@@ -1,0 +1,32 @@
+[package]
+name = "second_anchor"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "second_anchor"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
+bytemuck = { version = "1.13.1", features = ["derive", "min_const_generics"] }
+
+anchor-spl = "0.31.1"
+anyhow = "1.0.98"
+# borsh = "1.5.7"
+num-traits = "0.2.19"
+ruint = "1.15.0"
+
+raydium-cp-swap = { git = "https://github.com/raydium-io/raydium-cp-swap", features = [
+    "no-entrypoint",
+    "cpi",
+] }

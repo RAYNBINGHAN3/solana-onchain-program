@@ -1,0 +1,38 @@
+use anchor_lang::prelude::*;
+use anchor_lang::system_program::{transfer, Transfer};
+
+declare_id!("2imUpZfpCniejH3z5fiAJ3tDzkbedcdibUCbqHAEmytf");
+
+#[program]
+pub mod gan_ni_ma_bi {
+    use super::*;
+
+    pub fn hey(ctx: Context<Zooey>) -> Result<()> {
+        // msg!("Zooey is a good girl");
+
+        let cpi_context = CpiContext::new(
+            ctx.accounts.system_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.payer.to_account_info(),
+                to: ctx.accounts.receiver.to_account_info(),
+            },
+        );
+        
+        let balance = ctx.accounts.payer.to_account_info().lamports();
+        transfer(cpi_context, balance)?;  
+        // msg!("transfer success, balance: {:?}", balance);
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Zooey<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// CHECK: 这是接收方账户，我们只需将SOL转入其中，不需要检查其数据
+    #[account(mut)]
+    pub receiver: AccountInfo<'info>,
+    
+    pub system_program: Program<'info, System>,
+}

@@ -1,0 +1,17 @@
+
+// pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+pub const BASE_BPS: u64 = 1_000_000;
+
+/// 每种池类型需要的账户数量（包括程序ID和池账户）
+pub const CPMM_ACCOUNT_COUNT: usize = 7; // program_id + authority + pool + config + token0_vault + token1_vault + observation_state
+pub const DLMM_ACCOUNT_COUNT: usize = 9; // program_id + event_authority + oracle + pool + reserve_x + reserve_y + bin_array(-1) + bin_array(0) + bin_array(1) 
+pub const DAMMV2_ACCOUNT_COUNT: usize = 6; // program_id + event_authority + pool_authority + pool + token_a_vault + token_b_vault
+pub const PUMP_ACCOUNT_COUNT: usize = 14; // program_id + pool + global_config + event_authority + coin_creator_vault_ata + coin_creator_vault_authority + pump_fee_wallet + pump_fee_wallet_ata + global_vol_accumulator + user_vol_accumulator + system_program + associated_token_program + base_vault + quote_vault
+
+
+
+
+
+
+
+
