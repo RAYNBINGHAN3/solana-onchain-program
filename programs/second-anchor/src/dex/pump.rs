@@ -1,7 +1,7 @@
 use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{ceil_div, SCALE_OFFSET, ceil_div_u128};
 use anchor_lang::prelude::*;
- 
+use crate::utils::utils::get_transfer_fee;
 
 // // Pump程序ID
 // pub const PUMP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -15,6 +15,7 @@ pub mod pump_program_id {
 #[derive(Debug, Clone)]
 pub struct PumpPoolState {
     pub program_id_index: usize,
+ 
     pub pool_index: usize,
     pub global_config_index: usize,
     pub event_authority_index: usize,
@@ -42,6 +43,8 @@ pub struct PumpPoolState {
     pub lp_fee_basis_points: u64,
     pub protocol_fee_basis_points: u64,
     pub coin_creator_fee_basis_points: u64,
+    pub fee_config_index: usize,
+    pub fee_program_index: usize,
 }
 
 
@@ -171,7 +174,8 @@ pub fn pump_buy_quote_input_internal(
     }
 
     // 使用更高精度计算，避免舍入误差
-    let denominator = 10000_u128 + pool_state.trade_fee_rate as u128;
+    let total_fee_rate = pool_state.lp_fee_basis_points + pool_state.protocol_fee_basis_points + pool_state.coin_creator_fee_basis_points;
+    let denominator = 10000_u128 + total_fee_rate as u128;
     let effective_quote = (quote_amount as u128 * 10000_u128) / denominator;
 
     // base_amount_out = base_reserve * effective_quote / (quote_reserve + effective_quote)
@@ -229,16 +233,29 @@ pub fn pump_quote_exact_input_wsol(
     pool_state: &PumpPoolState,
     wsol_mint: Pubkey,
     wsol_amount: u64,
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
-    if pool_state.quote_mint == wsol_mint {
+    if wsol_amount == 0 {
+        return Ok(0);
+    }
+
+    let mut token_amount_out = if pool_state.quote_mint == wsol_mint {
         // WSOL 是 quote，所以这是 buy quote input
-        pump_buy_quote_input_internal(pool_state, wsol_amount)
+        pump_buy_quote_input_internal(pool_state, wsol_amount)?
     } else if pool_state.base_mint == wsol_mint {
         // WSOL 是 base，所以这是 sell base input
-        pump_sell_base_input_internal(pool_state, wsol_amount)
+        pump_sell_base_input_internal(pool_state, wsol_amount)?
     } else {
-        Err(ErrorCode::InvalidTokenPair.into())
-    }
+        return Err(ErrorCode::InvalidTokenPair.into());
+    };
+
+    let transfer_fee = get_transfer_fee(token_mint_info, token_amount_out)?;
+    token_amount_out = match transfer_fee {
+        0 => token_amount_out,
+        _ => token_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+
+    Ok(token_amount_out)
 }
 
 /// 便捷函数：根据 Token 方向自动选择正确的函数
@@ -246,12 +263,26 @@ pub fn pump_quote_exact_input_token(
     pool_state: &PumpPoolState,
     wsol_mint: Pubkey,
     token_amount: u64,
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
+    if token_amount == 0 {
+        return Ok(0);
+    }
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token_mint_info, token_amount)?;
+    let token_amount = match transfer_fee {
+        0 => token_amount,
+        _ => token_amount.checked_sub(transfer_fee).unwrap(),
+    };
+
     if pool_state.base_mint != wsol_mint {
         // Token 是 base，所以这是 sell base input
         pump_sell_base_input_internal(pool_state, token_amount)
-    } else {
+    } else if pool_state.quote_mint == wsol_mint {
         // Token 是 quote，所以这是 buy quote input
         pump_buy_quote_input_internal(pool_state, token_amount)
+    }else{
+        return Err(ErrorCode::InvalidTokenPair.into());
     }
 }

@@ -91,20 +91,20 @@ pub fn execute_dammv2_swap<'info>(
 
     // 🚀 优化: 直接构建切片，避免Vec的堆分配
     let account_infos = &[
-        accounts[pool_state.pool_authority_index].clone(),
-        accounts[pool_state.pool_index].clone(),
-        user_token_in.clone(),
-        user_token_out.clone(),
-        accounts[pool_state.token_a_vault_index].clone(),
-        accounts[pool_state.token_b_vault_index].clone(),
-        token_a_mint.clone(),
-        token_b_mint.clone(),
+        accounts[pool_state.pool_authority_index].to_account_info(),
+        accounts[pool_state.pool_index].to_account_info(),
+        user_token_in,
+        user_token_out,
+        accounts[pool_state.token_a_vault_index].to_account_info(),
+        accounts[pool_state.token_b_vault_index].to_account_info(),
+        token_a_mint,
+        token_b_mint,
         ctx.accounts.payer.to_account_info(),
-        token_a_program.clone(),
-        token_b_program.clone(),
-        accounts[pool_state.program_id_index].clone(),
-        accounts[pool_state.event_authority_index].clone(),
-        accounts[pool_state.program_id_index].clone(),
+        token_a_program,
+        token_b_program,
+        accounts[pool_state.program_id_index].to_account_info(),
+        accounts[pool_state.event_authority_index].to_account_info(),
+        accounts[pool_state.program_id_index].to_account_info(),
     ];
 
     // 执行CPI调用

@@ -38,9 +38,51 @@ pub enum ErrorCode {
     #[msg("Invalid activation type")]
     InvalidActivationType,
 
+
     #[msg("Invalid collect fee mode")]
     InvalidCollectFeeMode,
 
+    #[msg("Zero amount input")]
+    ZeroAmountInput,
+
+    #[msg("Invalid memo program")]
+    InvalidMemoProgram,
+
+    #[msg("Zero amount specified")]
+    ZeroAmountSpecified,
+
+    #[msg("Invalid sqrt price limit")]
+    InvalidSqrtPriceLimit,
+
+    #[msg("Too small input or output amount")]
+    TooSmallInputOrOutputAmount,
+
+    #[msg("Liquidity insufficient")]
+    LiquidityInsufficient,
+
+    #[msg("Invalid account data")]
+    InvalidAccountData,
+
+    #[msg("Not enough tick array account")]
+    NotEnoughTickArrayAccount,
+
+    #[msg("Max token overflow")]
+    MaxTokenOverflow,
+
+    #[msg("Sqrt price limit overflow")]
+    SqrtPriceLimitOverflow,
+
+    #[msg("Invalid tick index")]
+    InvalidTickIndex,
+
+    #[msg("Invalid sqrt price")]
+    InvalidSqrtPrice,
+
+    #[msg("Calculate overflow")]
+    CalculateOverflow,
+
+    #[msg("Invalid CLMM params")]
+    InvalidClmmParams,
 
     None,
 }

@@ -1,14 +1,13 @@
-use crate::constant::BASE_BPS;
 use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{SCALE_OFFSET};
 // use crate::utils::u128x128_math::{safe_mul_div_cast, Rounding, integer_sqrt_u128};
 use anchor_lang::prelude::*;
+use crate::utils::utils::{get_transfer_fee};
  
 pub mod cpmm_program_id {
     use super::*;
     declare_id!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
 }
-
 
 
 /// CPMM池状态数据结构 (简化版，包含关键字段)
@@ -35,16 +34,26 @@ pub struct CpmmPoolState {
     pub token0_mint: Pubkey,
     /// Token1 mint
     pub token1_mint: Pubkey,
-    /// 交易费率 (基点, 10000=100%)
+    /// 交易费率 (1000000=100%)
     pub trade_fee_rate: u64,
+    /// Creator费率 (1000000=100%)
+    pub creator_fee_rate: u64,
 
     pub price: u128,
+
+    pub enable_creator_fee: bool, // 是否启用creator费
+    pub creator_fee_on: u8, // 0: both 1: 在输入时收取 2: 在输出时收取
 
     // 添加费用字段以正确计算可用流动性
     pub protocol_fees_token_0: u64,
     pub protocol_fees_token_1: u64,
     pub fund_fees_token_0: u64,
     pub fund_fees_token_1: u64,
+    pub creator_fees_token_0: u64,
+    pub creator_fees_token_1: u64,
+
+    //1000000=100%
+    pub total_fee_rate: u64
 }
 
 /// 解析CPMM池数据 (根据IDL结构优化的解析函数)
@@ -103,22 +112,59 @@ pub fn parse_cpmm_pool_data(
         return Err(ErrorCode::ZeroLiquidity.into());
     }
 
-    // 从amm_config账户读取trade_fee_rate
+    // 从amm_config读取必要费率
     let amm_config_data = amm_config_account.data.borrow();
-    // trade_fee_rate在偏移量4..12
     let trade_fee_rate = u64::from_le_bytes(amm_config_data[12..20].try_into().unwrap());
-    pool_state.trade_fee_rate = trade_fee_rate;
+    let creator_fee_rate = u64::from_le_bytes(amm_config_data[108..116].try_into().unwrap());
+    
+    
+    pool_state.creator_fee_rate = creator_fee_rate;
     pool_state.token0_mint = token0_mint;
     pool_state.token1_mint = token1_mint;
 
+    // 解析所有费用累计 (根据真实pool数据结构)
     pool_state.protocol_fees_token_0 = u64::from_le_bytes(pool_data[341..349].try_into().unwrap());
     pool_state.protocol_fees_token_1 = u64::from_le_bytes(pool_data[349..357].try_into().unwrap());
     pool_state.fund_fees_token_0 = u64::from_le_bytes(pool_data[357..365].try_into().unwrap());
     pool_state.fund_fees_token_1 = u64::from_le_bytes(pool_data[365..373].try_into().unwrap());
+    
+    // creator_fee_on在偏移量389, enable_creator_fee在390
+    pool_state.creator_fee_on = pool_data[389];
+    pool_state.enable_creator_fee = pool_data[390] != 0;
+    
+    // creator_fees在偏移量397和405
+    pool_state.creator_fees_token_0 = u64::from_le_bytes(pool_data[397..405].try_into().unwrap());
+    pool_state.creator_fees_token_1 = u64::from_le_bytes(pool_data[405..413].try_into().unwrap());
 
-  
+    pool_state.trade_fee_rate = trade_fee_rate;
+
+    pool_state.total_fee_rate  = if pool_state.enable_creator_fee{
+        trade_fee_rate + creator_fee_rate
+    }else{
+        trade_fee_rate
+    };
+
 
     Ok(())
+}
+
+/// 判断是否在输入时收取creator fee
+fn is_creator_fee_on_input(
+    pool: &CpmmPoolState,
+    input_mint: Pubkey,
+) -> bool {
+    if !pool.enable_creator_fee {
+        return false;
+    }
+    
+    let is_input_token0 = input_mint == pool.token0_mint;
+    
+    match pool.creator_fee_on {
+        0 => true, // BothToken - 总是在输入时收取
+        1 => is_input_token0, // OnlyToken0 - 只有输入是token0时在输入收取
+        2 => !is_input_token0, // OnlyToken1 - 只有输入是token1时在输入收取
+        _ => false,
+    }
 }
 
 /// 计算扣除费用后的实际可用流动性 (模仿Raydium官方实现)
@@ -127,10 +173,10 @@ pub fn vault_amount_without_fee(
 ) -> (u64, u64) {
     (
         pool_state.token0_reserve
-            .checked_sub(pool_state.protocol_fees_token_0 + pool_state.fund_fees_token_0)
+            .checked_sub(pool_state.protocol_fees_token_0 + pool_state.fund_fees_token_0 + pool_state.creator_fees_token_0)
             .unwrap_or(0),
         pool_state.token1_reserve
-            .checked_sub(pool_state.protocol_fees_token_1 + pool_state.fund_fees_token_1)
+            .checked_sub(pool_state.protocol_fees_token_1 + pool_state.fund_fees_token_1 + pool_state.creator_fees_token_1)
             .unwrap_or(0),
     )
 }
@@ -187,6 +233,7 @@ pub fn cpmm_quote_exact_input_wsol(
     pool: &CpmmPoolState,
     wsol_mint: Pubkey,
     wsol_amount_in: u64,
+    mint_token_info: &AccountInfo,
 ) -> Result<u64> {
     
     // // 读取原始vault余额
@@ -214,19 +261,52 @@ pub fn cpmm_quote_exact_input_wsol(
         ErrorCode::ZeroLiquidity
     );
 
-    // 步骤1: 计算交易费用
-    let trade_fee = trading_fee(u128::from(wsol_amount_in), pool.trade_fee_rate, BASE_BPS);
+    // 步骤1: 计算费用
+    let trade_fee = (u128::from(wsol_amount_in) * u128::from(pool.trade_fee_rate) + 999999) / 1000000;
+    
+    // 判断creator fee是否在输入时收取
+    let is_creator_fee_on_input = is_creator_fee_on_input(pool, wsol_mint);
+    
+    let mut token_amount_out = if is_creator_fee_on_input {
+        // 在输入时收取creator fee
+        let creator_fee = (u128::from(wsol_amount_in) * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        let wsol_amount_after_fee = u128::from(wsol_amount_in)
+            .checked_sub(trade_fee)
+            .unwrap()
+            .checked_sub(creator_fee)
+            .unwrap();
+        
+        // 计算输出
+        let numerator = wsol_amount_after_fee.checked_mul(token_reserve as u128).unwrap();
+        let denominator = u128::from(wsol_reserve).checked_add(wsol_amount_after_fee).unwrap();
+        let token_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        token_amount_out
+    } else {
+        // 只扣除trade fee
+        let wsol_amount_after_fee = u128::from(wsol_amount_in).checked_sub(trade_fee).unwrap();
+        
+        // 计算输出
+        let numerator = wsol_amount_after_fee.checked_mul(token_reserve as u128).unwrap();
+        let denominator = u128::from(wsol_reserve).checked_add(wsol_amount_after_fee).unwrap();
+        let token_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        token_amount_out
+    };
+    
+    // 步骤2: 如果creator fee不在输入收取，则在输出收取
+    if !is_creator_fee_on_input && pool.enable_creator_fee {
+        let creator_fee = (token_amount_out * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        token_amount_out = token_amount_out.checked_sub(creator_fee).unwrap();
+    }
 
-    let wsol_amount_after_fee = u128::from(wsol_amount_in).checked_sub(trade_fee).unwrap();
-
-    // 步骤2: 使用恒定乘积公式计算输出
-    let numerator = wsol_amount_after_fee
-        .checked_mul(token_reserve as u128)
-        .unwrap();
-    let denominator = u128::from(wsol_reserve)
-        .checked_add(wsol_amount_after_fee)
-        .unwrap();
-    let token_amount_out = numerator.checked_div(denominator).unwrap();
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(mint_token_info, token_amount_out as u64)?;
+    token_amount_out = match transfer_fee {
+        0 => token_amount_out,
+        _ => token_amount_out.checked_sub(transfer_fee as u128).unwrap(),
+    };
+   
 
     Ok(token_amount_out as u64)
 }
@@ -237,7 +317,15 @@ pub fn cpmm_quote_exact_input_token(
     pool: &CpmmPoolState,
     wsol_mint: Pubkey,
     token_amount_in: u64,
+    mint_token_info: &AccountInfo,
 ) -> Result<u64> {
+
+    let transfer_fee = get_transfer_fee(mint_token_info, token_amount_in)?;
+    let token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
+    };
+
     // 🔥 关键修复：使用扣除费用后的实际可用流动性
     let (token0_reserve, token1_reserve) =
         vault_amount_without_fee(pool);
@@ -256,35 +344,58 @@ pub fn cpmm_quote_exact_input_token(
         ErrorCode::ZeroLiquidity
     );
 
-    // 步骤1: 计算交易费用
-    let trade_fee = trading_fee(u128::from(token_amount_in), pool.trade_fee_rate, BASE_BPS);
+    // 步骤1: 计算费用
+    let trade_fee = (u128::from(token_amount_in) * u128::from(pool.trade_fee_rate) + 999999) / 1000000;
+    
+    // 获取Token mint (非WSOL的那个)
+    let token_mint = if pool.token0_mint == wsol_mint {
+        pool.token1_mint
+    } else {
+        pool.token0_mint
+    };
+    
+    // 判断creator fee是否在输入时收取
+    let is_creator_fee_on_input = is_creator_fee_on_input(pool, token_mint);
+    
+    let mut wsol_amount_out = if is_creator_fee_on_input {
+        // 在输入时收取creator fee
+        let creator_fee = (u128::from(token_amount_in) * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        let token_amount_after_fee = u128::from(token_amount_in)
+            .checked_sub(trade_fee)
+            .unwrap()
+            .checked_sub(creator_fee)
+            .unwrap();
+        
+        // 计算输出
+        let numerator = token_amount_after_fee.checked_mul(wsol_reserve as u128).unwrap();
+        let denominator = u128::from(token_reserve).checked_add(token_amount_after_fee).unwrap();
+        let wsol_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        wsol_amount_out
+    } else {
+        // 只扣除trade fee
+        let token_amount_after_fee = u128::from(token_amount_in).checked_sub(trade_fee).unwrap();
+        
+        // 计算输出
+        let numerator = token_amount_after_fee.checked_mul(wsol_reserve as u128).unwrap();
+        let denominator = u128::from(token_reserve).checked_add(token_amount_after_fee).unwrap();
+        let wsol_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        wsol_amount_out
+    };
+    
+    // 步骤2: 如果creator fee不在输入收取，则在输出收取
+    if !is_creator_fee_on_input && pool.enable_creator_fee {
+        let creator_fee = (wsol_amount_out * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        wsol_amount_out = wsol_amount_out.checked_sub(creator_fee).unwrap();
+    }
 
-    let token_amount_after_fee = u128::from(token_amount_in).checked_sub(trade_fee).unwrap();
 
-    // 步骤2: 使用恒定乘积公式计算输出
-    // destination_amount = (source_amount_after_fee * destination_reserve) / (source_reserve + source_amount_after_fee)
-    let numerator = token_amount_after_fee
-        .checked_mul(wsol_reserve as u128)
-        .unwrap();
-    let denominator = u128::from(token_reserve)
-        .checked_add(token_amount_after_fee)
-        .unwrap();
-    let wsol_amount_out = numerator.checked_div(denominator).unwrap();
 
     Ok(wsol_amount_out as u64)
 }
 
-pub fn trading_fee(amount: u128, trade_fee_rate: u64, fee_denominator: u64) -> u128 {
-    amount
-        .checked_mul(u128::from(trade_fee_rate))
-        .unwrap()
-        .checked_add(u128::from(fee_denominator))
-        .unwrap()
-        .checked_sub(1)
-        .unwrap()
-        .checked_div(u128::from(fee_denominator))
-        .unwrap()
-}
+
 
 
 

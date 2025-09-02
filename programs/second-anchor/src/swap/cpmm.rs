@@ -81,7 +81,7 @@ pub fn execute_cpmm_swap<'info>(
     let mut account_metas = Vec::with_capacity(13);
     
     // 按照CPMM swap_base_input指令的账户顺序添加
-    account_metas.push(AccountMeta::new_readonly(ctx.accounts.payer.key(), true)); // payer (signer)
+    account_metas.push(AccountMeta::new(ctx.accounts.payer.key(), true)); // payer (signer)
     account_metas.push(AccountMeta::new_readonly(accounts[pool_state.authority_index].key(), false)); // authority
     account_metas.push(AccountMeta::new_readonly(accounts[pool_state.config_index].key(), false)); // amm_config
     account_metas.push(AccountMeta::new(accounts[pool_state.pool_index].key(), false)); // pool_state
@@ -111,18 +111,18 @@ pub fn execute_cpmm_swap<'info>(
     // 🚀 优化：构建账户信息数组
     let account_infos = &[
         ctx.accounts.payer.to_account_info(), // payer (signer)
-        accounts[pool_state.authority_index].clone(), // authority
-        accounts[pool_state.config_index].clone(), // amm_config
-        accounts[pool_state.pool_index].clone(), // pool_state
-        input_token_account.clone(), // input_token_account
-        output_token_account.clone(), // output_token_account
-        input_vault.clone(), // input_vault
-        output_vault.clone(), // output_vault
-        input_token_program.clone(), // input_token_program
-        output_token_program.clone(), // output_token_program
-        input_token_mint.clone(), // input_token_mint
-        output_token_mint.clone(), // output_token_mint
-        accounts[pool_state.observation_state_index].clone(), // observation_state
+        accounts[pool_state.authority_index].to_account_info(), // authority
+        accounts[pool_state.config_index].to_account_info(), // amm_config
+        accounts[pool_state.pool_index].to_account_info(), // pool_state
+        input_token_account.to_account_info(), // input_token_account
+        output_token_account.to_account_info(), // output_token_account
+        input_vault.to_account_info(), // input_vault
+        output_vault.to_account_info(), // output_vault
+        input_token_program.to_account_info(), // input_token_program
+        output_token_program.to_account_info(), // output_token_program
+        input_token_mint.to_account_info(), // input_token_mint
+        output_token_mint.to_account_info(), // output_token_mint
+        accounts[pool_state.observation_state_index].to_account_info(), // observation_state
     ];
 
     // 执行原始指令调用 - 最高效的方式！

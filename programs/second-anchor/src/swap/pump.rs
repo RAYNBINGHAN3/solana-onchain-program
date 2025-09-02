@@ -98,7 +98,7 @@ fn execute_pump_buy<'info>(
         };
 
     // 🚀 性能优化: 预分配账户数组 (Buy 有 21 个账户，包括两个统计账户)
-    let account_metas: [AccountMeta; 21] = [
+    let account_metas: [AccountMeta; 23] = [
         AccountMeta::new_readonly(accounts[pool_state.pool_index].key(), false), // pool
         AccountMeta::new(ctx.accounts.payer.key(), true), // user (writable, signer)
         AccountMeta::new_readonly(accounts[pool_state.global_config_index].key(), false), // global_config
@@ -120,6 +120,8 @@ fn execute_pump_buy<'info>(
         AccountMeta::new_readonly(accounts[pool_state.coin_creator_vault_authority_index].key(), false), // coin_creator_vault_authority
         AccountMeta::new(accounts[pool_state.global_vol_accumulator_index].key(), false), // global_volume_accumulator
         AccountMeta::new(accounts[pool_state.user_vol_accumulator_index].key(), false), // user_volume_accumulator
+        AccountMeta::new_readonly(accounts[pool_state.fee_config_index].key(), false), // fee_config
+        AccountMeta::new_readonly(accounts[pool_state.fee_program_index].key(), false), // fee_program
     ];
 
     //注意 这里假设了wsol就是quote 有可能会有bug
@@ -142,27 +144,29 @@ fn execute_pump_buy<'info>(
 
     // 🚀 性能优化: 直接构建账户切片，避免Vec的堆分配
     let account_infos = &[
-        accounts[pool_state.pool_index].clone(),
+        accounts[pool_state.pool_index].to_account_info(),
         ctx.accounts.payer.to_account_info(),
-        accounts[pool_state.global_config_index].clone(),
-        base_mint.clone(),
-        quote_mint.clone(),
-        user_base_token_account.clone(),
-        user_quote_token_account.clone(),
-        accounts[pool_state.base_vault_index].clone(),
-        accounts[pool_state.quote_vault_index].clone(),
-        accounts[pool_state.pump_fee_wallet_index].clone(),
-        accounts[pool_state.pump_fee_wallet_ata_index].clone(),
-        base_token_program.clone(),
-        quote_token_program.clone(),
-        accounts[pool_state.system_program_index].clone(),
-        accounts[pool_state.associated_token_program_index].clone(),
-        accounts[pool_state.event_authority_index].clone(),
-        accounts[pool_state.program_id_index].clone(),
-        accounts[pool_state.coin_creator_vault_ata_index].clone(),
-        accounts[pool_state.coin_creator_vault_authority_index].clone(),
-        accounts[pool_state.global_vol_accumulator_index].clone(),
-        accounts[pool_state.user_vol_accumulator_index].clone(),
+        accounts[pool_state.global_config_index].to_account_info(),
+        base_mint,
+        quote_mint,
+        user_base_token_account,
+        user_quote_token_account,
+        accounts[pool_state.base_vault_index].to_account_info(),
+        accounts[pool_state.quote_vault_index].to_account_info(),
+        accounts[pool_state.pump_fee_wallet_index].to_account_info(),
+        accounts[pool_state.pump_fee_wallet_ata_index].to_account_info(),
+        base_token_program,
+        quote_token_program,
+        accounts[pool_state.system_program_index].to_account_info(),
+        accounts[pool_state.associated_token_program_index].to_account_info(),
+        accounts[pool_state.event_authority_index].to_account_info(),
+        accounts[pool_state.program_id_index].to_account_info(),
+        accounts[pool_state.coin_creator_vault_ata_index].to_account_info(),
+        accounts[pool_state.coin_creator_vault_authority_index].to_account_info(),
+        accounts[pool_state.global_vol_accumulator_index].to_account_info(),
+        accounts[pool_state.user_vol_accumulator_index].to_account_info(),
+        accounts[pool_state.fee_config_index].to_account_info(),
+        accounts[pool_state.fee_program_index].to_account_info(),
     ];
 
     // 执行 CPI 调用
@@ -221,7 +225,7 @@ fn execute_pump_sell<'info>(
         };
 
     // 🚀 性能优化: 预分配账户数组 (Sell 有 19 个账户，比 Buy 少了两个统计账户)
-    let account_metas: [AccountMeta; 19] = [
+    let account_metas: [AccountMeta; 21] = [
         AccountMeta::new_readonly(accounts[pool_state.pool_index].key(), false), // pool
         AccountMeta::new(ctx.accounts.payer.key(), true), // user (writable, signer)
         AccountMeta::new_readonly(accounts[pool_state.global_config_index].key(), false), // global_config
@@ -241,6 +245,8 @@ fn execute_pump_sell<'info>(
         AccountMeta::new_readonly(accounts[pool_state.program_id_index].key(), false), // program
         AccountMeta::new(accounts[pool_state.coin_creator_vault_ata_index].key(), false), // coin_creator_vault_ata
         AccountMeta::new_readonly(accounts[pool_state.coin_creator_vault_authority_index].key(), false), // coin_creator_vault_authority
+        AccountMeta::new_readonly(accounts[pool_state.fee_config_index].key(), false), // fee_config
+        AccountMeta::new_readonly(accounts[pool_state.fee_program_index].key(), false), // fee_program
     ];
 
     // 🚀 性能优化: 直接构建指令数据
@@ -258,25 +264,27 @@ fn execute_pump_sell<'info>(
 
     // 🚀 性能优化: 直接构建账户切片
     let account_infos = &[
-        accounts[pool_state.pool_index].clone(),
+        accounts[pool_state.pool_index].to_account_info(),
         ctx.accounts.payer.to_account_info(),
-        accounts[pool_state.global_config_index].clone(),
-        base_mint.clone(),
-        quote_mint.clone(),
-        user_base_token_account.clone(),
-        user_quote_token_account.clone(),
-        accounts[pool_state.base_vault_index].clone(),
-        accounts[pool_state.quote_vault_index].clone(),
-        accounts[pool_state.pump_fee_wallet_index].clone(),
-        accounts[pool_state.pump_fee_wallet_ata_index].clone(),
-        base_token_program.clone(),
-        quote_token_program.clone(),
-        accounts[pool_state.system_program_index].clone(),
-        accounts[pool_state.associated_token_program_index].clone(),
-        accounts[pool_state.event_authority_index].clone(),
-        accounts[pool_state.program_id_index].clone(),
-        accounts[pool_state.coin_creator_vault_ata_index].clone(),
-        accounts[pool_state.coin_creator_vault_authority_index].clone(),
+        accounts[pool_state.global_config_index].to_account_info(),
+        base_mint,
+        quote_mint,
+        user_base_token_account,
+        user_quote_token_account,
+        accounts[pool_state.base_vault_index].to_account_info(),
+        accounts[pool_state.quote_vault_index].to_account_info(),
+        accounts[pool_state.pump_fee_wallet_index].to_account_info(),
+        accounts[pool_state.pump_fee_wallet_ata_index].to_account_info(),
+        base_token_program,
+        quote_token_program,
+        accounts[pool_state.system_program_index].to_account_info(),
+        accounts[pool_state.associated_token_program_index].to_account_info(),
+        accounts[pool_state.event_authority_index].to_account_info(),
+        accounts[pool_state.program_id_index].to_account_info(),
+        accounts[pool_state.coin_creator_vault_ata_index].to_account_info(),
+        accounts[pool_state.coin_creator_vault_authority_index].to_account_info(),
+        accounts[pool_state.fee_config_index].to_account_info(),
+        accounts[pool_state.fee_program_index].to_account_info(),
     ];
 
     // 执行 CPI 调用

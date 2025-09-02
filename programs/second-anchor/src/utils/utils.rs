@@ -3,6 +3,21 @@ use crate::dex::cpmm::cpmm_program_id;
 use crate::dex::dlmm::dlmm_program_id;
 use crate::dex::dammv2::dammv2_program_id;
 use crate::dex::pump::pump_program_id;
+use crate::dex::raydium::raydium_program_id;
+use crate::dex::clmm::clmm_program_id;
+use anchor_spl::{
+    token::{Token},
+    token_2022::{self as token_2022_program},
+    token_interface::spl_token_2022::{
+        self,
+        extension::{
+            transfer_fee::{TransferFeeConfig},
+            BaseStateWithExtensions,
+            StateWithExtensions,
+        }
+    }
+};
+
 
 #[derive(Debug, Clone)]
 pub struct TokenPoolGroup {
@@ -19,6 +34,8 @@ pub enum PoolType {
     DLMM,
     DAMMV2,
     PUMP,
+    RAYDIUM,
+    CLMM,
 }
 
 
@@ -67,9 +84,53 @@ pub enum PoolData {
         associated_token_program_index: usize,
         base_vault_index: usize,
         quote_vault_index: usize,
-    }
+        fee_config_index: usize,
+        fee_program_index: usize,
+    },
+    RAYDIUM {
+        program_id_index: usize,
+        pool_index: usize,
+        event_authority_index: usize,
+        base_vault_index: usize,
+        quote_vault_index: usize,
+    },
+    CLMM {
+        program_id_index: usize,
+        pool_index: usize,
+        amm_config_index: usize,
+        observation_key_index: usize,
+        bitmap_extension_index: usize,
+        token_vault_0_index: usize,
+        token_vault_1_index: usize,
+        tick_array_minus_1_index: usize,
+        tick_array_0_index: usize,
+        tick_array_1_index: usize,
+    },
 }
- 
+
+/// 获取转账手续费token2022 mint
+pub fn get_transfer_fee(mint_info: &AccountInfo, pre_fee_amount: u64) -> Result<u64> {
+    if *mint_info.owner == Token::id() {
+        return Ok(0);
+    }
+    let mint_data = mint_info.try_borrow_data()?;
+    let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
+
+    let fee = if let Ok(transfer_fee_config) = mint.get_extension::<TransferFeeConfig>() {
+        transfer_fee_config
+            .calculate_epoch_fee(Clock::get()?.epoch, pre_fee_amount)
+            .unwrap()
+    } else {
+        0
+    };
+    Ok(fee)
+}
+
+/// 判断token program是否为Token2022
+pub fn is_token_2022(token_program_id: Pubkey) -> bool {
+    token_program_id == token_2022_program::ID
+}
+
 
 
 /// 获取池类型
@@ -82,9 +143,11 @@ pub fn get_pool_type(pool_program_id: Pubkey) -> Result<Option<PoolType>> {
         Ok(Some(PoolType::DAMMV2))
     } else if pool_program_id == pump_program_id::ID {
         Ok(Some(PoolType::PUMP))
+    } else if pool_program_id == raydium_program_id::ID {
+        Ok(Some(PoolType::RAYDIUM))
+    } else if pool_program_id == clmm_program_id::ID {
+        Ok(Some(PoolType::CLMM))
     } else {
         Ok(None)
     }
 }
-
- 

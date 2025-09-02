@@ -7,13 +7,14 @@ use crate::dex::dlmm::{
     calculate_dlmm_total_fee_rate, get_dlmm_price_from_bin_array, parse_dlmm_pool_data,
     DlmmPoolState,
 };
-use crate::utils::errors::ErrorCode;
 use crate::dex::pump::{calculate_pump_price, parse_pump_pool_data, PumpPoolState};
-use crate::utils::utils::{PoolData, TokenPoolGroup};
+use crate::dex::raydium::{calculate_raydium_price, parse_raydium_pool_data, RaydiumPoolState};
+use crate::dex::clmm::{calculate_clmm_price, parse_clmm_pool_data, ClmmPoolState};
+use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{bps_to_q64, q64_mul, safe_mul_div_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
+use crate::utils::utils::{is_token_2022, PoolData, TokenPoolGroup};
 use anchor_lang::prelude::*;
- 
 
 /// 解析好的池状态数据，避免重复解析
 #[derive(Debug, Clone)]
@@ -35,6 +36,12 @@ pub enum ParsedPoolState {
     PUMP {
         state: PumpPoolState,
     },
+    RAYDIUM {
+        state: RaydiumPoolState,
+    },
+    CLMM {
+        state: ClmmPoolState,
+    },
 }
 
 /// 全局套利分析结果 (包含解析好的数据，避免重复解析)
@@ -43,9 +50,9 @@ pub struct GlobalArbitrageAnalysis {
     // pub has_opportunity: bool,
     pub best_token_mint_index: Option<usize>,
     pub max_profit_ratio: u128, // Q64.64格式利润率
-    // 包含解析好的池状态数据
-    pub buy_pool_state: Option<ParsedPoolState>,
-    pub sell_pool_state: Option<ParsedPoolState>,
+    // 包含解析好的池状态数据 - 使用Box减少栈使用
+    pub buy_pool_state: Option<Box<ParsedPoolState>>,
+    pub sell_pool_state: Option<Box<ParsedPoolState>>,
     pub token_program_index: Option<usize>,
     pub mint_token_account_index: Option<usize>,
 }
@@ -55,6 +62,7 @@ pub fn analyze_global_arbitrage_opportunities(
     token_groups: &[TokenPoolGroup],
     wsol_mint: Pubkey,
     accounts: &[AccountInfo],
+    is_dir_swap: bool,
 ) -> Result<GlobalArbitrageAnalysis> {
     let mut global_max_profit = 0u128; // Q64.64格式
     let mut best_token_mint_index = None;
@@ -62,12 +70,11 @@ pub fn analyze_global_arbitrage_opportunities(
     let mut best_mint_token_account_index = None;
     let mut best_buy_pool_state = None;
     let mut best_sell_pool_state = None;
-
+ 
     // 遍历每个token组
     for token_group in token_groups {
-
-        // 计算该token所有池的价格，同时解析池状态
-        let mut parsed_pools = Vec::with_capacity(6); //注意这里限制了一个mint最多6个池子
+        // 计算该token所有池的价格，同时解析池状态 - 使用Box减少栈使用
+        let mut parsed_pools: Vec<Box<ParsedPoolState>> = Vec::with_capacity(6); //注意这里限制了一个mint最多6个池子
 
         for pool_data in &token_group.pools {
             match parse_pool_with_state(
@@ -75,34 +82,35 @@ pub fn analyze_global_arbitrage_opportunities(
                 token_group.token_mint_index,
                 wsol_mint,
                 accounts,
+                is_dir_swap,
             ) {
                 Ok(parsed_state) => {
                     // 转换Q64.64为f64用于打印
                     // let (price_f64, fee_rate, pool_type, pool_address) = match &parsed_state {
-                        // ParsedPoolState::CPMM { state, .. } => (
-                        //     state.price as f64 / ONE as f64,
-                        //     state.trade_fee_rate,
-                        //     PoolType::CPMM,
-                        //     accounts[state.pool_index].key,
-                        // ),
-                        // ParsedPoolState::DLMM { state, .. } => (
-                        //     state.price as f64 / ONE as f64,
-                        //     state.total_fee_rate / 1_000,
-                        //     PoolType::DLMM,
-                        //     accounts[state.pool_index].key,
-                        // ),
-                        // ParsedPoolState::DAMMV2 { state, .. } => (
-                        //     state.price as f64 / ONE as f64,
-                        //     state.total_fee_rate / 1_000,
-                        //     PoolType::DAMMV2,
-                        //     accounts[state.pool_index].key,
-                        // ),
-                        // ParsedPoolState::PUMP { state, .. } => (
-                        //     state.price as f64 / ONE as f64,
-                        //     state.trade_fee_rate * 100, //pump是1w bps, 所以需要*100
-                        //     PoolType::PUMP,
-                        //     accounts[state.pool_index].key,
-                        // ),
+                    // ParsedPoolState::CPMM { state, .. } => (
+                    //     state.price as f64 / ONE as f64,
+                    //     state.trade_fee_rate,
+                    //     PoolType::CPMM,
+                    //     accounts[state.pool_index].key,
+                    // ),
+                    // ParsedPoolState::DLMM { state, .. } => (
+                    //     state.price as f64 / ONE as f64,
+                    //     state.total_fee_rate / 1_000,
+                    //     PoolType::DLMM,
+                    //     accounts[state.pool_index].key,
+                    // ),
+                    // ParsedPoolState::DAMMV2 { state, .. } => (
+                    //     state.price as f64 / ONE as f64,
+                    //     state.total_fee_rate / 1_000,
+                    //     PoolType::DAMMV2,
+                    //     accounts[state.pool_index].key,
+                    // ),
+                    // ParsedPoolState::PUMP { state, .. } => (
+                    //     state.price as f64 / ONE as f64,
+                    //     state.trade_fee_rate * 100, //pump是1w bps, 所以需要*100
+                    //     PoolType::PUMP,
+                    //     accounts[state.pool_index].key,
+                    // ),
                     // };
                     // msg!(
                     //     " ==> Type: {:?}, Pool: {:?}, Price: {:.12} SOL, fee: {} bps",
@@ -111,13 +119,25 @@ pub fn analyze_global_arbitrage_opportunities(
                     //     price_f64,
                     //     fee_rate
                     // );
-                    parsed_pools.push(parsed_state);
+                    parsed_pools.push(Box::new(parsed_state));
                 }
                 Err(_) => {
                     continue;
                     // return Err(e.into()); // 其他错误，继续抛出
                 }
             }
+        }
+
+        // 直接返回 不用对比价格
+        if is_dir_swap {
+            return Ok(GlobalArbitrageAnalysis {
+                best_token_mint_index: Some(token_group.token_mint_index),
+                max_profit_ratio: ONE,
+                buy_pool_state: Some(parsed_pools[0].clone()),
+                sell_pool_state: Some(parsed_pools[1].clone()),
+                token_program_index: Some(token_group.token_program_index),
+                mint_token_account_index: Some(token_group.mint_token_account_index),
+            });
         }
 
         // 分析该token的套利机会
@@ -129,8 +149,8 @@ pub fn analyze_global_arbitrage_opportunities(
                         best_token_mint_index = Some(token_group.token_mint_index);
                         best_token_program_index = Some(token_group.token_program_index);
                         best_mint_token_account_index = Some(token_group.mint_token_account_index);
-                        best_buy_pool_state = analysis.buy_pool_state;
-                        best_sell_pool_state = analysis.sell_pool_state;
+                        best_buy_pool_state = analysis.buy_pool_state.map(Box::new);
+                        best_sell_pool_state = analysis.sell_pool_state.map(Box::new);
                     }
                 }
                 Err(e) => {
@@ -156,6 +176,7 @@ fn parse_pool_with_state(
     token_mint_index: usize,
     wsol_mint: Pubkey,
     accounts: &[AccountInfo],
+    is_dir_swap: bool,
 ) -> Result<ParsedPoolState> {
     match pool_data {
         PoolData::CPMM {
@@ -186,6 +207,12 @@ fn parse_pool_with_state(
                 protocol_fees_token_1: 0,
                 fund_fees_token_0: 0,
                 fund_fees_token_1: 0,
+                creator_fee_rate: 0,
+                enable_creator_fee: false,
+                creator_fee_on: 0,
+                creator_fees_token_0: 0,
+                creator_fees_token_1: 0,
+                total_fee_rate: 0,
             };
 
             parse_cpmm_pool_data(
@@ -196,10 +223,13 @@ fn parse_pool_with_state(
                 accounts,
                 &mut pool_state,
             )?;
-            calculate_cpmm_price(
-                wsol_mint,
-                &mut pool_state,
-            )?;
+            
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::CPMM { state: pool_state });
+            }
+
+            calculate_cpmm_price(wsol_mint, &mut pool_state)?;
 
             let parsed_state = ParsedPoolState::CPMM { state: pool_state };
 
@@ -244,6 +274,19 @@ fn parse_pool_with_state(
                 accounts,
                 &mut pool_state,
             )?;
+
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::DLMM {
+                    state: pool_state,
+                    reserve_x_index: *reserve_x_index,
+                    reserve_y_index: *reserve_y_index,
+                    bin_array_minus_1_index: *bin_array_minus_1_index,
+                    bin_array_0_index: *bin_array_0_index,
+                    bin_array_1_index: *bin_array_1_index
+                });
+            }
+
             get_dlmm_price_from_bin_array(
                 wsol_mint,
                 // accounts,
@@ -309,6 +352,11 @@ fn parse_pool_with_state(
                 &mut pool_state,
             )?;
 
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::DAMMV2 { state: pool_state });
+            }
+
             calculate_dammv2_price(&mut pool_state, wsol_mint)?;
 
             let current_point = match pool_state.activation_type {
@@ -338,6 +386,8 @@ fn parse_pool_with_state(
             associated_token_program_index,
             base_vault_index,
             quote_vault_index,
+            fee_config_index,
+            fee_program_index,
         } => {
             let mut pool_state = PumpPoolState {
                 program_id_index: *program_id_index,
@@ -363,6 +413,8 @@ fn parse_pool_with_state(
                 lp_fee_basis_points: 0,
                 protocol_fee_basis_points: 0,
                 coin_creator_fee_basis_points: 0,
+                fee_config_index: *fee_config_index,
+                fee_program_index: *fee_program_index,
             };
 
             parse_pump_pool_data(
@@ -373,15 +425,118 @@ fn parse_pool_with_state(
                 &mut pool_state,
             )?;
 
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::PUMP { state: pool_state });
+            }
+
             calculate_pump_price(&mut pool_state, wsol_mint)?;
 
             let parsed_state = ParsedPoolState::PUMP { state: pool_state };
 
             Ok(parsed_state)
         }
+        PoolData::RAYDIUM {
+            program_id_index,
+            event_authority_index,
+            pool_index,
+            base_vault_index,
+            quote_vault_index,
+        } => {
+            let mut pool_state = RaydiumPoolState {
+                program_id_index: *program_id_index,
+                event_authority_index: *event_authority_index,
+                pool_index: *pool_index,
+                base_vault_index: *base_vault_index,
+                quote_vault_index: *quote_vault_index,
+                base_mint: *accounts[token_mint_index].key,
+                quote_mint: wsol_mint,
+                base_reserve: 0,
+                quote_reserve: 0,
+                trade_fee_rate: 0,
+                price: 0,
+                swap_fee_numerator: 0,
+                swap_fee_denominator: 0,
+                base_need_take_pnl: 0,
+                quote_need_take_pnl: 0,
+            };
+
+            parse_raydium_pool_data(
+                pool_index,
+                wsol_mint,
+                *accounts[token_mint_index].key,
+                accounts,
+                &mut pool_state,
+            )?;
+
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::RAYDIUM { state: pool_state });
+            }
+
+            calculate_raydium_price(&mut pool_state, wsol_mint)?;
+
+            let parsed_state = ParsedPoolState::RAYDIUM { state: pool_state };
+
+            Ok(parsed_state)
+        },
+        PoolData::CLMM {
+            program_id_index,
+            pool_index,
+            amm_config_index,
+            observation_key_index,
+            token_vault_0_index,
+            token_vault_1_index,
+            tick_array_minus_1_index,
+            tick_array_0_index,
+            tick_array_1_index,
+            bitmap_extension_index,
+        } => {
+            let mut pool_state = ClmmPoolState {
+                program_id_index: *program_id_index,
+                pool_index: *pool_index,
+                amm_config_index: *amm_config_index,
+                observation_key_index: *observation_key_index,
+                token_vault_0_index: *token_vault_0_index,
+                token_vault_1_index: *token_vault_1_index,
+                tick_array_minus_1_index: *tick_array_minus_1_index,
+                tick_array_0_index: *tick_array_0_index,
+                tick_array_1_index: *tick_array_1_index,
+                bitmap_extension_index: *bitmap_extension_index,
+                token_mint_0: *accounts[token_mint_index].key,
+                token_mint_1: wsol_mint,
+                sqrt_price_x64: 0,
+                tick_current: 0,
+                tick_spacing: 0,
+                liquidity: 0,
+                trade_fee_rate: 0,
+                price: 0,
+
+                tick_array_bitmap: [0; 16],
+            };
+
+            parse_clmm_pool_data(
+                pool_index,
+                amm_config_index,
+                wsol_mint,
+                *accounts[token_mint_index].key,
+                accounts,
+                &mut pool_state,
+            )?;
+
+            // 直接交易模式 不用计算价格 返回当前池状态
+            if is_dir_swap {
+                return Ok(ParsedPoolState::CLMM { state: pool_state });
+            }
+            
+            calculate_clmm_price(&mut pool_state, wsol_mint)?;
+
+            let parsed_state = ParsedPoolState::CLMM { state: pool_state };
+
+            Ok(parsed_state)
+        }
     }
 }
-
 
 #[derive(Debug)]
 struct TokenArbitrageAnalysis {
@@ -391,9 +546,8 @@ struct TokenArbitrageAnalysis {
     pub sell_pool_state: Option<ParsedPoolState>,
 }
 
-
 fn analyze_token_arbitrage_with_states(
-    parsed_pools: &[ParsedPoolState],
+    parsed_pools: &[Box<ParsedPoolState>],
 ) -> Result<TokenArbitrageAnalysis> {
     if parsed_pools.len() < 2 {
         return Ok(TokenArbitrageAnalysis {
@@ -406,15 +560,26 @@ fn analyze_token_arbitrage_with_states(
     // 🚀 优化1：预处理所有池子的价格和手续费，避免重复转换
     let mut pool_data: Vec<(u128, u128)> = Vec::with_capacity(parsed_pools.len());
     for pool in parsed_pools {
-        let (price, fee_q64) = match pool {
-            ParsedPoolState::CPMM { state, .. } => (state.price, bps_to_q64(state.trade_fee_rate)),
+        let (price, fee_q64) = match pool.as_ref() {
+            // 注意：手续费统一转成BASE_BPS
+            ParsedPoolState::CPMM { state, .. } => (state.price, bps_to_q64(state.total_fee_rate)), //cpmm的total_fee_rate包含creator_fee_rate
             ParsedPoolState::DLMM { state, .. } => {
+
                 (state.price, bps_to_q64(state.total_fee_rate / 1000))
             }
             ParsedPoolState::DAMMV2 { state, .. } => {
                 (state.price, bps_to_q64(state.total_fee_rate / 1000))
             }
-            ParsedPoolState::PUMP { state, .. } => (state.price, bps_to_q64(state.trade_fee_rate * 100)),
+            ParsedPoolState::PUMP { state, .. } => {
+                (state.price, bps_to_q64(state.trade_fee_rate * 100))
+            }
+            ParsedPoolState::RAYDIUM { state, .. } => {
+
+                (state.price, bps_to_q64(state.trade_fee_rate))
+            },
+            ParsedPoolState::CLMM { state, .. } => {
+                (state.price, bps_to_q64(state.trade_fee_rate))
+            }
         };
         pool_data.push((price, fee_q64));
     }
@@ -438,7 +603,7 @@ fn analyze_token_arbitrage_with_states(
             if price_i == 0 || price_j == 0 {
                 continue;
             }
-            
+
             // 快速筛选：价格必须有差异
             if price_j <= price_i {
                 continue;
@@ -448,9 +613,8 @@ fn analyze_token_arbitrage_with_states(
             // 直接用现有的safe_mul_div_cast函数，内部用U256
             let price_ratio = safe_mul_div_cast(price_j, ONE, price_i, Rounding::Up);
             let threshold = ONE + fee_i + fee_j + q64_mul(fee_i, fee_j); // 对于amm类型精确 但是dlmm不精确
-            // let max_fee = max(fee_i, fee_j);
-            // let threshold = ONE + max_fee; //初略筛选 避免dlmm的精度问题
-
+                                                                         // let max_fee = max(fee_i, fee_j);
+                                                                         // let threshold = ONE + max_fee; //初略筛选 避免dlmm的精度问题
 
             if price_ratio > threshold {
                 // msg!("price_ratio: {}, threshold_org: {}", price_ratio, threshold_org);
@@ -462,8 +626,7 @@ fn analyze_token_arbitrage_with_states(
                     best_max_profit_ratio =
                         safe_mul_div_cast(profit_diff, ONE, threshold, Rounding::Up);
                 } else {
-                    let profit_ratio =
-                        safe_mul_div_cast(profit_diff, ONE, threshold, Rounding::Up);
+                    let profit_ratio = safe_mul_div_cast(profit_diff, ONE, threshold, Rounding::Up);
                     if profit_ratio > best_max_profit_ratio {
                         best_buy_idx = i;
                         best_sell_idx = j;
@@ -475,17 +638,17 @@ fn analyze_token_arbitrage_with_states(
     }
 
     // return Ok(TokenArbitrageAnalysis {
-    //     max_profit_ratio: 123123,
-    //     buy_pool_state: Some(parsed_pools[1].clone()),
-    //     sell_pool_state: Some(parsed_pools[0].clone()),
+    //     max_profit_ratio: 4446744073709551616,
+    //     buy_pool_state: Some(parsed_pools[0].clone()),
+    //     sell_pool_state: Some(parsed_pools[1].clone()),
     // });
 
     // 🚀 优化3：只在找到最优解后才clone，并计算最终利润率
     if best_max_profit_ratio > 0 {
         Ok(TokenArbitrageAnalysis {
             max_profit_ratio: best_max_profit_ratio,
-            buy_pool_state: Some(parsed_pools[best_buy_idx].clone()),
-            sell_pool_state: Some(parsed_pools[best_sell_idx].clone()),
+            buy_pool_state: Some(parsed_pools[best_buy_idx].as_ref().clone()),
+            sell_pool_state: Some(parsed_pools[best_sell_idx].as_ref().clone()),
         })
     } else {
         Ok(TokenArbitrageAnalysis {

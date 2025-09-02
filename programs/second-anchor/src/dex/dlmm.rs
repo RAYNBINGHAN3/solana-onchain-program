@@ -1,6 +1,7 @@
 use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{safe_mul_shr_cast, safe_shl_div_cast, Rounding};
 use crate::utils::u64x64_math::{pow, ONE, SCALE_OFFSET};
+use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
  
 pub mod dlmm_program_id {
@@ -494,6 +495,7 @@ pub fn dlmm_quote_exact_input_wsol_optimized(
     wsol_mint: Pubkey,
     wsol_amount_in: u64,
     ordered_bins: &[(i32, BinState)], // 已按交易方向排序的bins
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     // 确定交易方向：WSOL输入，Token输出
     let swap_for_y = if pool.token_x_mint == wsol_mint {
@@ -511,6 +513,13 @@ pub fn dlmm_quote_exact_input_wsol_optimized(
         ordered_bins,
     )?;
 
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token_mint_info, token_amount_out)?;
+    let token_amount_out = match transfer_fee {
+        0 => token_amount_out,
+        _ => token_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+
     Ok(token_amount_out)
 }
 
@@ -520,6 +529,7 @@ pub fn dlmm_quote_exact_input_token_optimized(
     wsol_mint: Pubkey,
     token_amount_in: u64,
     ordered_bins: &[(i32, BinState)], // 已按交易方向排序的bins
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     // 确定交易方向：Token输入，WSOL输出
     let swap_for_y = if pool_state.token_x_mint == wsol_mint {
@@ -528,6 +538,13 @@ pub fn dlmm_quote_exact_input_token_optimized(
         true // Token是X输入，WSOL是Y输出，输出Y，所以swap_for_y=true
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
+    };
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token_mint_info, token_amount_in)?;
+    let token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
     };
 
     // 🚀 使用超级优化的跨bin计算

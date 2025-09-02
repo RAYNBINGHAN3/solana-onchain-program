@@ -3,6 +3,7 @@ use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{ONE, get_fee_in_period};
 use crate::utils::u128x128_math::{safe_mul_div_cast, Rounding, mul_div_u256};
 use ruint::aliases::U256;
+use crate::utils::utils::get_transfer_fee;
 
 // pub const DAMM_V2_PROGRAM_ID: &str = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG";
 
@@ -16,6 +17,7 @@ pub mod dammv2_program_id {
 #[derive(Debug, Clone)]
 pub struct Dammv2PoolState {
     pub program_id_index: usize,
+ 
     pub event_authority_index: usize,
     pub pool_authority_index: usize,
 
@@ -366,6 +368,7 @@ pub fn dammv2_quote_exact_input_wsol(
     wsol_mint: Pubkey,
     wsol_amount_in: u64,
     current_point: u64,
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     if wsol_amount_in == 0 {
         return Ok(0);
@@ -410,7 +413,7 @@ pub fn dammv2_quote_exact_input_wsol(
     };
 
     // 如果费用在输出上收取，需要扣除费用
-    let final_output = if !fee_mode.fees_on_input {
+    let mut final_output = if !fee_mode.fees_on_input {
         let total_fee = calculate_fee_on_amount_detailed(
             pool,
             output_amount,
@@ -423,6 +426,13 @@ pub fn dammv2_quote_exact_input_wsol(
         output_amount
     };
 
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token_mint_info, final_output)?;
+    final_output = match transfer_fee {
+        0 => final_output,
+        _ => final_output.checked_sub(transfer_fee).unwrap(),
+    };
+
     Ok(final_output)
 }
 
@@ -432,6 +442,7 @@ pub fn dammv2_quote_exact_input_token(
     wsol_mint: Pubkey,
     token_amount_in: u64,
     current_point: u64,
+    token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     if token_amount_in == 0 {
         return Ok(0);
@@ -441,6 +452,13 @@ pub fn dammv2_quote_exact_input_token(
         msg!("Skip dammv2 zero liquidity");
         return Ok(0);
     }
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token_mint_info, token_amount_in)?;
+    let token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
+    };
 
     // 确定交易方向：Token输入，WSOL输出
     let a_to_b = if pool.token_a_mint == wsol_mint {
