@@ -14,10 +14,11 @@ pub fn execute_cpmm_swap<'info>(
     trade_amount: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
+    wsol_mint: Pubkey,
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
    
-    let wsol_mint = ctx.accounts.wsol_mint.key();
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
 
     // 根据买入/卖出确定输入输出金库
     let (input_vault, output_vault) = if is_buy {

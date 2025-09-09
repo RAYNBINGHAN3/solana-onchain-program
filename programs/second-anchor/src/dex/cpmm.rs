@@ -103,19 +103,29 @@ pub fn parse_cpmm_pool_data(
         ErrorCode::InvalidAccount
     );
 
-    let token0_vault_data = &accounts[pool_state.token0_vault_index].data.borrow();
-    let token1_vault_data = &accounts[pool_state.token1_vault_index].data.borrow();
-    pool_state.token0_reserve = u64::from_le_bytes(token0_vault_data[64..72].try_into().unwrap());
-    pool_state.token1_reserve = u64::from_le_bytes(token1_vault_data[64..72].try_into().unwrap());
+    //保在{} 减少borrow
+    // let token0_vault_data = &accounts[pool_state.token0_vault_index].data.borrow();
+    // let token1_vault_data = &accounts[pool_state.token1_vault_index].data.borrow();
+    pool_state.token0_reserve = {
+        let token0_vault_data = &accounts[pool_state.token0_vault_index].data.borrow();
+        u64::from_le_bytes(token0_vault_data[64..72].try_into().unwrap())
+    };
+    pool_state.token1_reserve = {
+        let token1_vault_data = &accounts[pool_state.token1_vault_index].data.borrow();
+        u64::from_le_bytes(token1_vault_data[64..72].try_into().unwrap())
+    };
     
     if pool_state.token0_reserve == 0 || pool_state.token1_reserve == 0 {
         return Err(ErrorCode::ZeroLiquidity.into());
     }
 
     // 从amm_config读取必要费率
-    let amm_config_data = amm_config_account.data.borrow();
-    let trade_fee_rate = u64::from_le_bytes(amm_config_data[12..20].try_into().unwrap());
-    let creator_fee_rate = u64::from_le_bytes(amm_config_data[108..116].try_into().unwrap());
+    // let amm_config_data = amm_config_account.data.borrow();
+    let (trade_fee_rate, creator_fee_rate) = {  
+        let amm_config_data = amm_config_account.data.borrow();
+        (u64::from_le_bytes(amm_config_data[12..20].try_into().unwrap()), u64::from_le_bytes(amm_config_data[108..116].try_into().unwrap()))
+    };
+    // let creator_fee_rate = u64::from_le_bytes(amm_config_data[108..116].try_into().unwrap());  
     
     
     pool_state.creator_fee_rate = creator_fee_rate;
@@ -143,6 +153,8 @@ pub fn parse_cpmm_pool_data(
     }else{
         trade_fee_rate
     };
+
+    drop(pool_data);
 
 
     Ok(())

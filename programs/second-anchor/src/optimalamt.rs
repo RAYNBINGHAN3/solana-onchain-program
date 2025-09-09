@@ -9,7 +9,7 @@ use crate::dex::dlmm::{
 use crate::dex::pump::{pump_quote_exact_input_token, pump_quote_exact_input_wsol};
 use crate::dex::raydium::{raydium_quote_exact_input_token, raydium_quote_exact_input_wsol};
 use crate::utils::errors::ErrorCode;
-use crate::utils::u128x128_math::{safe_mul_div_cast, Rounding};
+use crate::utils::u128x128_math::{integer_sqrt_u128, safe_mul_div_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
 use anchor_lang::prelude::*;
 use std::cmp::min;
@@ -18,9 +18,9 @@ use std::cmp::min;
 #[derive(Debug)]
 pub struct OptimizationResult {
     pub optimal_wsol_amount: u64,
+    pub total_wsol_out: u64,
     pub max_profit: u64,
     pub max_mint_amount_out: u64,
-    pub iterations: u8,
 }
 
 /// 优化的黄金分割法寻找最优买入SOL数量
@@ -80,6 +80,7 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
             sell_pool_state,
             buy_pool_price,
             sell_pool_price,
+            wsol_mint,
         )?
     } else {
         (None, None)
@@ -129,18 +130,18 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
     // msg!("profit: {}, token_amount_out: {}", profit, token_amount_out);
     // return Ok(OptimizationResult {
     //     optimal_wsol_amount: test_point,
-    //     max_profit: profit,
+    //     max_profit: 1234,
     //     max_mint_amount_out: token_amount_out,
-    //     iterations: 0,
+    //     total_wsol_out: test_point + 1234 as u64,
     // });
-
+    
     require!(profit > 0, ErrorCode::NoProfit);
     if right <= 100_000 && profit > min_profit as i64 {
         return Ok(OptimizationResult {
             optimal_wsol_amount: test_point,
             max_profit: profit as u64,
             max_mint_amount_out: token_amount_out,
-            iterations: 0,
+            total_wsol_out: test_point + min_profit as u64,
         });
     }
 
@@ -225,13 +226,13 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
     //helius sender
     require!(max_profit > min_profit as i64, ErrorCode::NoProfit);
 
-    best_amount = min(best_amount, max_wsol_balance);
+    best_amount = min(best_amount, max_wsol_balance); //这里不知道max_wsol_balance输出的profit 有bug
 
     Ok(OptimizationResult {
         optimal_wsol_amount: best_amount,
         max_profit: max_profit as u64,
         max_mint_amount_out,
-        iterations,
+        total_wsol_out: best_amount + min_profit as u64,
     })
 }
 
@@ -516,10 +517,17 @@ fn get_clmm_params<'c, 'info>(
     sell_pool_state: &ParsedPoolState,
     buy_pool_price: u128,
     sell_pool_price: u128,
+    wsol_mint: Pubkey,
 ) -> Result<(Option<ClmmParams<'c, 'info>>, Option<ClmmParams<'c, 'info>>)> {
     let buy_clmm_params: Option<ClmmParams> = match buy_pool_state {
         ParsedPoolState::CLMM { state } => {
-            let sqrt_price_limit_x64 = sell_pool_price;
+            let mut sqrt_price_limit_x64 = integer_sqrt_u128(sell_pool_price) << 32; // Q64.64格式的开平方
+            
+            // 确保sqrt价格格式一致
+            if state.token_mint_1 != wsol_mint {
+                sqrt_price_limit_x64 = safe_mul_div_cast(ONE, ONE, sqrt_price_limit_x64, Rounding::Down);
+            }
+            
             let tick_arrays = vec![
                 &accounts[state.tick_array_minus_1_index],
                 &accounts[state.tick_array_0_index],
@@ -542,7 +550,13 @@ fn get_clmm_params<'c, 'info>(
                 &accounts[state.tick_array_1_index],
             ];
             let bitmap_extension = &accounts[state.bitmap_extension_index];
-            let sqrt_price_limit_x64 = buy_pool_price;
+            let mut sqrt_price_limit_x64 = integer_sqrt_u128(buy_pool_price) << 32; // Q64.64格式的开平方
+            
+            // 确保sqrt价格格式一致
+            if state.token_mint_1 != wsol_mint {
+                sqrt_price_limit_x64 = safe_mul_div_cast(ONE, ONE, sqrt_price_limit_x64, Rounding::Down);
+            }
+            
             Some(ClmmParams {
                 tick_arrays,
                 bitmap_extension,
@@ -590,10 +604,12 @@ fn get_max_effective_input_wsol_from_buy<'c, 'info>(
             } else {
                 state.token_b_vault_index
             };
-            let wsol_vault = &accounts[wsol_vault_index];
-            let wsol_vault_data = wsol_vault.data.borrow();
-            let wsol_balance =
-                u64::from_le_bytes(wsol_vault_data[64..72].try_into().unwrap_or([0; 8]));
+            let wsol_balance = {
+                let wsol_vault_data = &accounts[wsol_vault_index].data.borrow();
+                u64::from_le_bytes(wsol_vault_data[64..72].try_into().unwrap_or([0; 8]))
+            };
+        
+
             safe_mul_div_cast(wsol_balance as u128, max_profit_ratio, ONE, Rounding::Down) as u64
             //后续版本优化算法
         }
@@ -621,9 +637,22 @@ fn get_max_effective_input_wsol_from_buy<'c, 'info>(
             } else {
                 false
             };
+            // 将Q64.64格式的价格转换为Q64.64格式的开平方
+            // sqrt(price_q64) = sqrt(price * 2^64) = sqrt(price) * 2^32
+            let mut sqrt_sell_price_x64 = integer_sqrt_u128(sell_pool_price) << 32;
+            
+            // 关键修复：确保sqrt价格格式一致
+            // sell_pool_price是SOL/token格式，但state.sqrt_price_x64是原始的sqrt(token1/token0)格式
+            // 如果WSOL不是token1，需要取sqrt_sell_price_x64的倒数来匹配原始格式
+            if state.token_mint_1 != wsol_mint {
+                // sqrt_sell_price_x64 现在是 sqrt(SOL/token) = sqrt(token0/token1)
+                // 需要转换为 sqrt(token1/token0) 来匹配 state.sqrt_price_x64
+                sqrt_sell_price_x64 = safe_mul_div_cast(ONE, ONE, sqrt_sell_price_x64, Rounding::Down);
+            }
+            
             calculate_amount_in_range(
                 state.sqrt_price_x64,
-                sell_pool_price,
+                sqrt_sell_price_x64,
                 state.liquidity,
                 zero_for_one,
                 true,
@@ -670,10 +699,11 @@ fn get_max_effective_input_wsol_form_sell<'c, 'info>(
             } else {
                 state.token_b_vault_index
             };
-            let wsol_vault = &accounts[wsol_vault_index];
-            let wsol_vault_data = wsol_vault.data.borrow();
-            let wsol_balance =
-                u64::from_le_bytes(wsol_vault_data[64..72].try_into().unwrap_or([0; 8]));
+            let wsol_balance = {
+                let wsol_vault_data = &accounts[wsol_vault_index].data.borrow();
+                u64::from_le_bytes(wsol_vault_data[64..72].try_into().unwrap_or([0; 8]))
+            };
+           
             safe_mul_div_cast(wsol_balance as u128, max_profit_ratio, ONE, Rounding::Down) as u64
             //后续版本优化算法
         }
@@ -699,12 +729,19 @@ fn get_max_effective_input_wsol_form_sell<'c, 'info>(
             } else {
                 true
             };
+            let mut sqrt_buy_price_x64 = integer_sqrt_u128(buy_pool_price) << 32; // Q64.64格式的开平方
+            
+            // 确保sqrt价格格式一致
+            if state.token_mint_1 != wsol_mint {
+                sqrt_buy_price_x64 = safe_mul_div_cast(ONE, ONE, sqrt_buy_price_x64, Rounding::Down);
+            }
+            
             calculate_amount_in_range(
                 state.sqrt_price_x64,
-                buy_pool_price,
+                sqrt_buy_price_x64,
                 state.liquidity,
                 zero_for_one,
-                false,
+                true,
             )?
             .unwrap_or(0)
         },

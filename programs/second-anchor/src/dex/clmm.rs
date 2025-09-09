@@ -213,18 +213,28 @@ pub fn parse_clmm_pool_data(
         *pool_account.owner == clmm_program_id::ID,
         ErrorCode::InvalidPoolOwner
     );
-
-    let pool_data = pool_account.data.borrow();
-
-    // 解析基础字段 (偏移量8开始)
-    let sqrt_price_x64 = u128::from_le_bytes(pool_data[245..261].try_into().unwrap());
-    let tick_current = i32::from_le_bytes(pool_data[261..265].try_into().unwrap());
-    let tick_spacing = u16::from_le_bytes(pool_data[227..229].try_into().unwrap());
-    let liquidity = u128::from_le_bytes(pool_data[229..245].try_into().unwrap());
-
-    // 解析mint地址 (偏移量73开始)
-    let token_mint_0 = Pubkey::try_from(&pool_data[65..97]).unwrap();
-    let token_mint_1 = Pubkey::try_from(&pool_data[97..129]).unwrap();
+ 
+    // 解析基础池数据
+    let (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1, tick_array_bitmap) = {
+        let pool_data = pool_account.data.borrow();
+  
+        // 解析基础字段 (偏移量8开始，加上discriminator)
+        let tick_spacing = u16::from_le_bytes(pool_data[235..237].try_into().unwrap());
+        let liquidity = u128::from_le_bytes(pool_data[237..253].try_into().unwrap());
+        let sqrt_price_x64 = u128::from_le_bytes(pool_data[253..269].try_into().unwrap());
+        let tick_current = i32::from_le_bytes(pool_data[269..273].try_into().unwrap());
+        // 解析mint地址 (偏移量73开始)
+        let token_mint_0 = Pubkey::try_from(&pool_data[73..105]).unwrap();
+        let token_mint_1 = Pubkey::try_from(&pool_data[105..137]).unwrap();
+        // 解析tick_array_bitmap (偏移量904开始，16个u64 = 128字节)
+        let tick_array_bitmap: [u64; 16] = pool_data[904..1032]
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<u64>>()
+            .try_into()
+            .unwrap();
+        (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1, tick_array_bitmap)
+    };
 
     // 验证池子包含SOL和指定token的配对
     let (_, other_mint) = if token_mint_0 == wsol_mint {
@@ -235,39 +245,19 @@ pub fn parse_clmm_pool_data(
         return Err(ErrorCode::InvalidTokenPair.into());
     };
 
+
     require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-    // 解析vault地址 (偏移量137开始)
-    // let token_vault_0 = Pubkey::try_from(&pool_data[137..169]).unwrap();
-    // let token_vault_1 = Pubkey::try_from(&pool_data[169..201]).unwrap();
 
-    // 解析配置相关 (偏移量201开始)
-    // let amm_config = Pubkey::try_from(&pool_data[201..233]).unwrap();
-    // let observation_key = Pubkey::try_from(&pool_data[233..265]).unwrap();
-
-    // 解析时间戳 (偏移量265开始)
-    // let open_time = u64::from_le_bytes(pool_data[265..273].try_into().unwrap());
-
-    // 解析费率增长 (偏移量361开始)
-    // let fee_growth_global_0_x64 = u128::from_le_bytes(pool_data[269..285].try_into().unwrap());
-    // let fee_growth_global_1_x64 = u128::from_le_bytes(pool_data[285..301].try_into().unwrap());
 
     // 解析amm_config fee
     let amm_config_account = &accounts[*amm_config_index];
     // let protocol_fee_rate = u32::from_le_bytes(amm_config_account.data.borrow()[35..39].try_into().unwrap());
-    let trade_fee_rate =
-        u32::from_le_bytes(amm_config_account.data.borrow()[39..43].try_into().unwrap());
-    // let tick_spacing = u16::from_le_bytes(amm_config_account.data.borrow()[43..45].try_into().unwrap());
-    // let fund_fee_rate = u32::from_le_bytes(amm_config_account.data.borrow()[45..49].try_into().unwrap());
+    let trade_fee_rate = {
+        let amm_config_data = amm_config_account.data.borrow();
+        u32::from_le_bytes(amm_config_data[47..51].try_into().unwrap())
+    };
 
     pool_state.trade_fee_rate = trade_fee_rate as u64;
-
-    let tick_array_bitmap: [u64; 16] = pool_data[773..901]
-        .chunks_exact(8)
-        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-
     pool_state.tick_array_bitmap = tick_array_bitmap;
     // pool_state.protocol_fee_rate = protocol_fee_rate;
     // pool_state.fund_fee_rate = fund_fee_rate;
@@ -297,10 +287,10 @@ pub fn calculate_clmm_price(pool_state: &mut ClmmPoolState, wsol_mint: Pubkey) -
 
     // 如果WSOL不是token1，需要取倒数
     if pool_state.token_mint_1 != wsol_mint {
-        price_q64 = (ONE.checked_shl(64).unwrap())
-            .checked_div(price_q64)
-            .unwrap();
+        // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
+        price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
     }
+    // msg!("price_q64: {}", price_q64);
     pool_state.price = price_q64;
 
     Ok(())

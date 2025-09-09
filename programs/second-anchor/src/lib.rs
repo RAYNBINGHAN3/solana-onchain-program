@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{TokenAccount, TokenInterface, Mint};
 use anchor_spl::memo::Memo;
+use anchor_lang::solana_program::log::sol_log_compute_units;
  
 pub mod constant;
 pub mod dex;
@@ -14,6 +15,7 @@ use constant::{CPMM_ACCOUNT_COUNT, DLMM_ACCOUNT_COUNT, DAMMV2_ACCOUNT_COUNT, PUM
 use utils::utils::{get_pool_type, PoolData, PoolType, TokenPoolGroup};
 use comparison::analyze_global_arbitrage_opportunities;
 use optimalamt::find_optimal_wsol_amount_golden_section;
+ 
  
  
 
@@ -66,6 +68,7 @@ pub mod zooey_go {
         is_fail: u8, // 0: 不失败，1: 失败
         is_dir_swap: u8, // 0: onchain计算，1: 直接cpi
         amount_in: u64, //only for is_dir_swap = 1
+        is_simulate: u8, // 0: 模拟，1: 实际
     ) -> Result<()> {
         if is_dir_swap == 1 {
             require!(amount_in > 0, ErrorCode::ZeroAmountInput);
@@ -239,7 +242,8 @@ pub mod zooey_go {
             return Ok(());
         }
 
-        
+       
+
         match analyze_global_arbitrage_opportunities(
             &token_groups,
             wsol_mint,
@@ -257,6 +261,11 @@ pub mod zooey_go {
                     }
                 }
 
+                // 获取当前使用的compute unit
+                if is_simulate == 1 {                   
+                    sol_log_compute_units();
+                }
+
                 // 计算最优买入SOL数量
                 match calculate_optimal_wsol_amount(
                     &analysis,
@@ -266,25 +275,39 @@ pub mod zooey_go {
                     min_profit,
                 ) {
                     Ok(optimization_result) => {
+
+                        // 获取当前使用的compute unit 使用2 - 1 算出calculate_optimal_wsol_amount使用的compute unit
+                        if is_simulate == 1 {
+                            sol_log_compute_units();
+                        }
+
                         let initial_wsol_balance = ctx.accounts.wsol_token_account.amount;
-                        
                         match swap::swap::execute_arbitrage_swaps(
                             &analysis,
                             &optimization_result,
                             &ctx.remaining_accounts,
                             &ctx,
                             initial_wsol_balance,
-                            min_profit
+                            min_profit,
+                            wsol_mint,
                         ) {
-                            Ok(()) => {}
+                            Ok(swap_result) => {
+                                if is_simulate == 1 {
+                                    msg!("Dolina1: {:?}", swap_result.wsol_in);
+                                    msg!("Dolina2: {:?}", swap_result.profit);
+                                    // msg!("Dolina3: {:?}", swap_result.profit);
+                                    return Ok(());
+                                }
+                            }
                             Err(e) => {
                                 return Err(e.into());
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
                         if is_fail == 1 {
-                            return Err(ErrorCode::NoProfit.into());
+                            return Err(e.into());
+                            // return Err(ErrorCode::NoProfit.into());
                         } else {
                             msg!("No opportunities 1");
                             return Ok(());
@@ -361,7 +384,7 @@ fn to_dir_swap<'a, 'b, 'c, 'info>(
                 optimal_wsol_amount: amount_in,
                 max_mint_amount_out: 0, // 这个值会在交换过程中重新计算
                 max_profit: 0,
-                iterations: 0,
+                total_wsol_out: 0,
             };
                   
             // 如果优化后的wsol数量大于余额wsol数量，则使用余额wsol数量
@@ -371,19 +394,18 @@ fn to_dir_swap<'a, 'b, 'c, 'info>(
                 optimization_result.optimal_wsol_amount
             };
 
-            // 如果买入池是pump，则需要最大quote amount out
+            // 如果买入池是pump，quote是wsol， 则需要计算base amount in
             if let Some(buy_pool) = analysis.buy_pool_state.as_ref() {
                 if let comparison::ParsedPoolState::PUMP { state } = buy_pool.as_ref() {
-                //pumpfun我操你妈 暂时认为所有都是wsol为quote的
-                let max_mint_amount_out = dex::pump::pump_quote_exact_input_wsol(
-                    state, 
-                    wsol_mint, 
-                    amount_in, 
-                    &ctx.remaining_accounts[analysis.mint_token_account_index.unwrap()]
-                )?;
-
-                //玩意余额用满了 怕cpi调用pump_buy_base_input_internal算出来最大quote输入大于余额 傻逼pump
-                optimization_result.max_mint_amount_out = max_mint_amount_out * 9998 / 10000; 
+                    if wsol_mint == state.quote_mint {
+                        let max_mint_amount_out = dex::pump::pump_quote_exact_input_wsol(
+                            state, 
+                            wsol_mint, 
+                            amount_in, 
+                            &ctx.remaining_accounts[analysis.mint_token_account_index.unwrap()]
+                        )?;
+                        optimization_result.max_mint_amount_out = max_mint_amount_out;
+                    }
                 }
             }
             
@@ -394,16 +416,19 @@ fn to_dir_swap<'a, 'b, 'c, 'info>(
                 &ctx.remaining_accounts,
                 ctx,
                 initial_wsol_balance,
-                min_profit
+                min_profit,
+                wsol_mint,
             ) {
-                Ok(()) => {}
+                Ok(_swap_result) => {}
                 Err(e) => {
                     return Err(e.into());
+                    // return Err(ErrorCode::None.into()); // 隐藏Noprift错误
                 }
             }
         }
         Err(e) => {
              return Err(e.into());
+            //  return Err(ErrorCode::None.into()); // 隐藏Noprift错误
         }
     }
     Ok(())

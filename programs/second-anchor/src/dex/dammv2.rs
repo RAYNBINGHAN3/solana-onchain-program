@@ -178,7 +178,7 @@ pub fn parse_dammv2_pool_data(
     // 解析collect_fee_mode (偏移量484)
     let collect_fee_mode = pool_data[484];
 
- 
+    drop(pool_data);
 
     // 填充池状态
     pool_state.token_a_mint = token_a_mint;

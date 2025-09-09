@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program, BN } from "@coral-xyz/anchor";
 import { ZooeyGo } from "../target/types/zooey_go";
-import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, createAssociatedTokenAccount, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
+import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, createAssociatedTokenAccount, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import { SystemProgram, PublicKey, TransactionMessage, VersionedTransaction, Connection, ComputeBudgetProgram, Transaction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import idl from "../target/idl/zooey_go.json";
@@ -69,6 +69,51 @@ function deriveEventAuthority(programId: PublicKey) {
     [Buffer.from("__event_authority")],
     programId
   );
+}
+
+function get_tick_array_pubkeys(poolAddress, tick_spacing, tick_current) {
+  const TICK_ARRAY_SIZE = 60; // Raydium CLMM tick array size
+  const ticks_in_array = TICK_ARRAY_SIZE * tick_spacing;
+  const offsets = [-1, 0, 1];
+  const result = [];
+
+  for (let offset of offsets) {
+    try {
+      const base_start_index = compute_tick_array_start_index(tick_current, tick_spacing);
+      const offset_start_index = base_start_index + offset * ticks_in_array;
+      
+      // 创建seeds数组
+      // offset_start_index需要转换为4字节的big-endian字节数组
+      const offsetBuffer = Buffer.allocUnsafe(4);
+      offsetBuffer.writeInt32BE(offset_start_index, 0);
+      
+      const seeds = [
+        Buffer.from("tick_array"),
+        poolAddress.toBuffer(),
+        offsetBuffer
+      ];
+      
+      const [pubkey] = PublicKey.findProgramAddressSync(seeds, new PublicKey('CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'));
+      result.push(pubkey);
+    } catch (error) {
+      console.error(`无法计算tick array地址，跳过offset ${offset}:`, error.message);
+      continue;
+    }
+  }
+  
+  return result;
+}
+
+function compute_tick_array_start_index(tick, tick_spacing) {
+  const TICK_ARRAY_SIZE = 60;
+  const ticks_in_array = TICK_ARRAY_SIZE * tick_spacing;
+  let start = Math.floor(tick / ticks_in_array);
+  
+  if (tick < 0 && tick % ticks_in_array !== 0) {
+    start = start - 1;
+  }
+  
+  return start * ticks_in_array;
 }
 
 // 自动解析DLMM池账户的函数
@@ -163,6 +208,7 @@ it("Is initialized!", async () => {
   const wsolTokenAccount = new PublicKey('GoF2hQNozCm2fB9HXDR7hFeFs4S3Pc15iF9m9oSC5wKF');
   const dlmmPoolProgramId = new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo');
   const cpmmPoolProgramId = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
+  const CLMM_PROGRAM_ID = new PublicKey('CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK');
 
   // Token 2
   const tokenMint2 = new PublicKey('G8RBkZTf74Fn7gTFesTf8nztFujZngTqmUzvcX7VBAGS');
@@ -240,7 +286,7 @@ it("Is initialized!", async () => {
 
 
 
-  const tokenMint3 = new PublicKey('9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump');
+  const tokenMint3 = new PublicKey('HBsbZz9hvxzi3EnCYWLLwvMPWgV4aeC74mEdvTg9bonk');
   const tokenMint3TokenAccount = getAssociatedTokenAddressSync(tokenMint3, provider.publicKey);
   //检查tokenMint3TokenAccount是否存在
   const tokenMint3TokenAccountInfo = await connection.getAccountInfo(tokenMint3TokenAccount);
@@ -259,27 +305,44 @@ it("Is initialized!", async () => {
     const transaction = new Transaction().add(createTokenMint3TokenAccountTx);
     const signature = await provider.sendAndConfirm(transaction);
   }
+  //cpmm 
 
+  
+
+  //cpmm池
+  const cpmmAuthority = new PublicKey('GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL');
+  const cpmmConfig = new PublicKey('D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2');
+  const cpmmObservationState = new PublicKey('GD3vcswEBTGxEubfSEkcuPn36xKZC64tQyMyamvsAgVk');
+  const cpmmPool = new PublicKey('GRk5Zr5LbnwLsDa45PSKc81DmN9YcMGE5CirxUjTHkrL');
+  const cpmmTokenAVault = new PublicKey('CHEgp3fDL23foTpMAV9Y3RLzxLxDNYUwX5vvTkBB9hRd');
+  const cpmmTokenBVault = new PublicKey('E8tW96jhvBtEAv3fGw7hgKwUhzgXQoixVmQtCxDwbJUJ');
+
+  //clmm 
+  const clmmPool = new PublicKey('aLn9BeKaauEcRjHEaGG1HZZGRppNDuniQNAfGbeirHz');
+  const clmmAmmConfig = new PublicKey('6tBc3ABLaYTTWu94DiRD5PWi92HML34UpAQ8pPTYgudw');
+  const clmmObservationKey = new PublicKey('C7XgNrfjwMXitrjXjjqHRw4nvtWr3wkmFpYfHA3oLAy9');
+  const clmmBitmapExtension = new PublicKey('61Ec4Sodgw7hr95A6VJhX6vZ3XSCZVor5nSR9YDETybK');
+  const clmmTokenVault0 = new PublicKey('57rRSZkq12DNiKcT1cUtFv2sNr7hpnoRQKaTKgwsZACF');
+  const clmmTokenVault1 = new PublicKey('7iQ6Xa4Scd6QcWZ7HVZwpMTMosb3j583zy9v6TxZKnet');
+  const tickArrays = get_tick_array_pubkeys(clmmPool, 120, 54332);
+  const clmmTickArrayMinus1 = new PublicKey(tickArrays[0]);
+  const clmmTickArray0 = new PublicKey(tickArrays[1]);
+  const clmmTickArray1 = new PublicKey(tickArrays[2]);
+  
   // dammv2池
-  // const cpmmAuthority = new PublicKey('3rmHSu74h1ZcmAisVcWerTCiRDQbUrBKmcwptYGjHfet');
-  // const cpmmConfig = new PublicKey('D4FPEruKEHrG5TenZ2mpDGEfu1iUvTiqBxvpU8HLBvC2');
-  // const cpmmObservationState = new PublicKey('9woVxF3LRkYU6hHzfSHcPMo5wfJs9Rpofc1JHgnQDBNv');
-  // const cpmmPool = new PublicKey('BSh8SjXvauDvNRAzsVGibW1kB8eaaXWJYnf36SC9T7HC');
-  // const cpmmTokenAVault = new PublicKey('136CHHCWu8zk1jg2h3DUZZt756mNqddSyNRmyokLTqKy');
-  // const cpmmTokenBVault = new PublicKey('GWh7KHDfWC96ZRpWrXicznW7wzKcqfTsfa1X5jDnQimb');
   // const dammv2PoolProgramId_2 = new PublicKey('cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG');
   // const dammv2EventAuthority_2 = new PublicKey('3rmHSu74h1ZcmAisVcWerTCiRDQbUrBKmcwptYGjHfet');
   // const dammv2PoolAuthority_2 = new PublicKey('HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC');
   // const dammv2Pool_2 = new PublicKey('9KgyYoNFpMTxCRKVKXRmp8oqFF6rNLEFkNJbgxXYNgE');
   // const dammv2PoolTokenAVault_2 = new PublicKey('2YquvcnzVxuHwDv56pviD8hjJa7du8XbmbDw19pyju72');
   // const dammv2PoolTokenBVault_2 = new PublicKey('6u7EbawNzvKz3Uy3cBR2Qk5fzmnV8G6myeRP3RzCHwrr');
+  
   //raydium amm
-
-  const raydiumPoolProgramId = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-  const raydiumEventAuthority = new PublicKey('5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1');
-  const raydiumPool = new PublicKey('Bzc9NZfMqkXR6fz1DBph7BDf9BroyEf6pnzESP7v5iiw');
-  const raydiumPoolTokenBaseVault = new PublicKey('F6iWqisguZYprVwp916BgGR7d5ahP6Ev5E213k8y3MEb');
-  const raydiumPoolTokenQuoteVault = new PublicKey('7bxbfwXi1CY7zWUXW35PBMZjhPD27SarVuHaehMzR2Fn');
+  // const raydiumPoolProgramId = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+  // const raydiumEventAuthority = new PublicKey('5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1');
+  // const raydiumPool = new PublicKey('Bzc9NZfMqkXR6fz1DBph7BDf9BroyEf6pnzESP7v5iiw');
+  // const raydiumPoolTokenBaseVault = new PublicKey('F6iWqisguZYprVwp916BgGR7d5ahP6Ev5E213k8y3MEb');
+  // const raydiumPoolTokenQuoteVault = new PublicKey('7bxbfwXi1CY7zWUXW35PBMZjhPD27SarVuHaehMzR2Fn');
 
 
   // DLMM池 - 自动解析所有账户
@@ -292,12 +355,14 @@ it("Is initialized!", async () => {
 
 
 
-  const tx = await program.methods.zooey(1, 0).accounts({
+  const tx = await program.methods.zooey(1, 0, 0, new BN(0), 0).accounts({
     payer: provider.publicKey,
     wsolMint: wsolMint,
     wsolTokenAccount: wsolTokenAccount,
     // systemProgram: SystemProgram.programId, 
     tokenProgram: TOKEN_PROGRAM_ID,
+    tokenProgram2022: TOKEN_2022_PROGRAM_ID,
+    // memoProgram: new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
     // associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
   })
     .remainingAccounts([
@@ -368,29 +433,30 @@ it("Is initialized!", async () => {
 
 
 
-
-
-      // // //tokenMint3
+      // // // //tokenMint3
       { pubkey: tokenMint3, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: tokenMint3TokenAccount, isSigner: false, isWritable: true },
 
-      // CPMM池账户 - 使用自动解析的账户
-      { pubkey: raydiumPoolProgramId, isSigner: false, isWritable: false },
-      { pubkey: raydiumEventAuthority, isSigner: false, isWritable: false },
-      { pubkey: raydiumPool, isSigner: false, isWritable: true },
-      { pubkey: raydiumPoolTokenBaseVault, isSigner: false, isWritable: true },
-      { pubkey: raydiumPoolTokenQuoteVault, isSigner: false, isWritable: true },
+      // // CPMM池账户 - 使用自动解析的账户
+      { pubkey: cpmmPoolProgramId, isSigner: false, isWritable: false },
+      { pubkey: cpmmAuthority, isSigner: false, isWritable: false },
+      { pubkey: cpmmConfig, isSigner: false, isWritable: false },
+      { pubkey: cpmmObservationState, isSigner: false, isWritable: true },
+      { pubkey: cpmmPool, isSigner: false, isWritable: true },
+      { pubkey: cpmmTokenAVault, isSigner: false, isWritable: true },
+      { pubkey: cpmmTokenBVault, isSigner: false, isWritable: true },
 
-      { pubkey: dlmmPoolProgramId, isSigner: false, isWritable: false },
-      { pubkey: dlmmAccounts2_4.eventAuthority, isSigner: false, isWritable: false },
-      { pubkey: dlmmAccounts2_4.oracle, isSigner: false, isWritable: true },
-      { pubkey: dlmmPool2_4, isSigner: false, isWritable: true },
-      { pubkey: dlmmAccounts2_4.reserveX, isSigner: false, isWritable: true },
-      { pubkey: dlmmAccounts2_4.reserveY, isSigner: false, isWritable: true },
-      { pubkey: dlmmAccounts2_4.binArrayMinus1, isSigner: false, isWritable: true },
-      { pubkey: dlmmAccounts2_4.binArray0, isSigner: false, isWritable: true },
-      { pubkey: dlmmAccounts2_4.binArrayPlus1, isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(CLMM_PROGRAM_ID), isSigner: false, isWritable: false },
+      { pubkey: new PublicKey(clmmPool), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmAmmConfig), isSigner: false, isWritable: false },
+      { pubkey: new PublicKey(clmmObservationKey), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmBitmapExtension), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmTokenVault0), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmTokenVault1), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmTickArrayMinus1), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmTickArray0), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(clmmTickArray1), isSigner: false, isWritable: true }
 
 
     ]).instruction()
@@ -401,8 +467,8 @@ it("Is initialized!", async () => {
 
   const lookupTableAccount8 = await connection.getAddressLookupTable(new PublicKey('4sKLJ1Qoudh8PJyqBeuKocYdsZvxTcRShUt9aKqwhgvC'));
   const lookupTableAccount9 = await connection.getAddressLookupTable(new PublicKey('9VmnnZQLCAVyNkrGoKmYojBkv3KEQFFfhnpN65fK4qDM'));
-  const lookupTableAccount10 = await connection.getAddressLookupTable(new PublicKey('H8s6DCRVbyUUDULb9hKbEvt9Ed3D4ifWUeujEJG57TJG'));
-  const lookupTableAccount11 = await connection.getAddressLookupTable(new PublicKey('FLVnikJRcVF8qtCATajymFZMkjbTFmeGsE5QaRnUkjHo'));
+  const lookupTableAccount10 = await connection.getAddressLookupTable(new PublicKey('ETQCLXKWUdshCFwrD8GUqosv4iufTky2LhRC9SU8Y1qX'));
+  const lookupTableAccount11 = await connection.getAddressLookupTable(new PublicKey('2kotaTTtLqEwbjvmN7cTxCWjqSHCWGimpyJVt13HSvww'));
   const lookupTableAccount12 = await connection.getAddressLookupTable(new PublicKey('2x53gwFo59Spyu77Ns3cB6AyC9ZDZsZLG4ZvQXeKy8yD'));
   const lookupTableAccount13 = await connection.getAddressLookupTable(new PublicKey('BdK993bMGz7G2sJEiyDwcbT53b262GqpS3Up4f1QRSoM'));
   const lookupTableAccount14 = await connection.getAddressLookupTable(new PublicKey('6fLdHzPQooFcxyEvnZtr6jfbtcr5Wg1rTpQVYZEqKQ58'));
@@ -412,7 +478,7 @@ it("Is initialized!", async () => {
   while (count < 30000) {
     const latestBlockhash = await connection.getLatestBlockhash();
     const computeBudgetInstruction = ComputeBudgetProgram.setComputeUnitLimit({ units: 440_000 });
-    const computeBudgetPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 2000 });
+    const computeBudgetPrice = ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 12000 });
 
     // 过滤出存在的lookup table账户
     const validLookupTables = [

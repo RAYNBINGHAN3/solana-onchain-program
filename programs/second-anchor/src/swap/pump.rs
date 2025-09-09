@@ -19,32 +19,64 @@ pub fn execute_pump_swap<'info>(
     max_or_min_amount_out: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
+    wsol_mint: Pubkey,
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
     if is_buy {
-        // msg!("执行 Pump 买入交易");
-        execute_pump_buy(
-            pool_state,
-            token_mint_index,
-            token_program_index,
-            token_account_index,
-            trade_amount,
-            max_or_min_amount_out,
-            accounts,
-            ctx,
-        )
+        if wsol_mint == pool_state.quote_mint {
+            execute_pump_buy(
+                pool_state,
+                token_mint_index,
+                token_program_index,
+                token_account_index,
+                trade_amount,
+                max_or_min_amount_out,
+                accounts,
+                ctx,
+                wsol_mint
+            )
+        } else {
+            execute_pump_sell(
+                pool_state,
+                token_mint_index,
+                token_program_index,
+                token_account_index,
+                trade_amount,
+                0,
+                accounts,
+                ctx,
+                wsol_mint
+            )
+        }
+
     } else {
-        // msg!("执行 Pump 卖出交易");
-        execute_pump_sell(
-            pool_state,
-            token_mint_index,
-            token_program_index,
-            token_account_index,
-            trade_amount,
-            max_or_min_amount_out,
-            accounts,
-            ctx,
-        )
+        if wsol_mint == pool_state.quote_mint {
+            execute_pump_sell(
+                pool_state,
+                token_mint_index,
+                token_program_index,
+                token_account_index,
+                trade_amount,
+                0,
+                accounts,
+                ctx,
+                wsol_mint
+            )
+        } else {
+          
+            execute_pump_buy(
+                pool_state,
+                token_mint_index,
+                token_program_index,
+                token_account_index,
+                trade_amount, // token in amount
+                max_or_min_amount_out, //此时max_or_min_amount_out为wsol wsol_amount为token
+                accounts,
+                ctx,
+                wsol_mint
+            )
+        }    
     }
 }
 
@@ -58,8 +90,8 @@ fn execute_pump_buy<'info>(
     max_token_amount_out: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
+    wsol_mint: Pubkey,
 ) -> Result<()> {
-    let wsol_mint = ctx.accounts.wsol_mint.key();
 
     // 确定 base 和 quote mint/program
     let (base_mint, quote_mint, base_token_program, quote_token_program) =
@@ -124,8 +156,11 @@ fn execute_pump_buy<'info>(
         AccountMeta::new_readonly(accounts[pool_state.fee_program_index].key(), false), // fee_program
     ];
 
-    //注意 这里假设了wsol就是quote 有可能会有bug
-    let max_quote_amount_in = pump_buy_base_input_internal(pool_state, max_token_amount_out)?;
+    //注意 如果quote mint是wsol 那么max_quote_amount_in计算真实最大quote amount in, 如果quote mint是token 不算了，因为token余额只有那么多
+    let mut max_quote_amount_in = wsol_amount;
+    if pool_state.quote_mint == wsol_mint {
+        max_quote_amount_in = pump_buy_base_input_internal(pool_state, max_token_amount_out)?;
+    }
     
     // msg!("max_quote_amount_in: {} wsol_amount: {}", max_quote_amount_in, wsol_amount);
 
@@ -185,9 +220,9 @@ fn execute_pump_sell<'info>(
     min_quote_amount_out: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
+    wsol_mint: Pubkey,
 ) -> Result<()> {
-    let wsol_mint = ctx.accounts.wsol_mint.key();
-
+    
     // 确定 base 和 quote mint/program
     let (base_mint, quote_mint, base_token_program, quote_token_program) =
         if pool_state.base_mint == wsol_mint {
@@ -248,6 +283,8 @@ fn execute_pump_sell<'info>(
         AccountMeta::new_readonly(accounts[pool_state.fee_config_index].key(), false), // fee_config
         AccountMeta::new_readonly(accounts[pool_state.fee_program_index].key(), false), // fee_program
     ];
+
+
 
     // 🚀 性能优化: 直接构建指令数据
     let mut instruction_data = Vec::with_capacity(24); // 8字节discriminator + 8字节base_amount_in + 8字节min_quote_amount_out

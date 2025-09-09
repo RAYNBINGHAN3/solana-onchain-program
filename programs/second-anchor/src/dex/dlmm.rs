@@ -187,7 +187,9 @@ pub fn parse_dlmm_pool_data(
     };
 
     require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-
+   
+    drop(pool_data);
+    
     // reserve地址在token_y_mint之后
     // let reserve_x = Pubkey::try_from(&pool_data[pair_offset + 80..pair_offset + 112]).unwrap();
     // let reserve_y = Pubkey::try_from(&pool_data[pair_offset + 112..pair_offset + 144]).unwrap();
@@ -931,14 +933,22 @@ fn get_bin_array_range(bin_array_account: &AccountInfo) -> Result<Option<(i32, i
         return Ok(None);
     }
 
-    let data = bin_array_account.data.borrow();
-    if data.len() < 16 {
-        return Ok(None);
-    }
+    // let data = bin_array_account.data.borrow();
+    // if data.len() < 16 {
+    //     return Ok(None);
+    // }
 
     // 读取 index (offset 8-16)
-    let index_i64 = i64::from_le_bytes(data[8..16].try_into().unwrap());
-    let index = index_i64 as i32;
+    // let index_i64 = i64::from_le_bytes(data[8..16].try_into().unwrap());
+    // let index = index_i64 as i32;
+
+    let index = {
+        let data = bin_array_account.data.borrow();
+        if data.len() < 16 {
+            return Ok(None);
+        }
+        i64::from_le_bytes(data[8..16].try_into().unwrap()) as i32
+    };
 
     let start_bin_id = index * MAX_BIN_PER_ARRAY as i32;
     let end_bin_id = start_bin_id + MAX_BIN_PER_ARRAY as i32 - 1;

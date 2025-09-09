@@ -4,6 +4,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
 
+
 /// 执行CLMM交换
 pub fn execute_clmm_swap<'info>(
     pool_state: &ClmmPoolState,
@@ -17,7 +18,8 @@ pub fn execute_clmm_swap<'info>(
 ) -> Result<()> {
     // let wsol_mint = ctx.accounts.wsol_mint.key();
     // let token_mint = accounts[token_mint_index].key();
-    let program_id = accounts[token_program_index].key();
+    // let program_id = accounts[token_program_index].key();
+    let program_id = accounts[pool_state.program_id_index].key();
 
     // 确定交换方向和账户
     let (

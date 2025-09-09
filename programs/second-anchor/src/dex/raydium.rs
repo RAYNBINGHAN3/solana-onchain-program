@@ -70,11 +70,15 @@ pub fn parse_raydium_pool_data(
 
     // 验证另一个token是我们期望的token
     require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-    
-    let base_vault_data = &accounts[pool_state.base_vault_index].data.borrow();
-    let quote_vault_data = &accounts[pool_state.quote_vault_index].data.borrow();
-    let base_reserve = u64::from_le_bytes(base_vault_data[64..72].try_into().unwrap());
-    let quote_reserve = u64::from_le_bytes(quote_vault_data[64..72].try_into().unwrap());
+
+    let base_reserve = {
+        let base_vault_data = &accounts[pool_state.base_vault_index].data.borrow();
+        u64::from_le_bytes(base_vault_data[64..72].try_into().unwrap())
+    };
+    let quote_reserve = {
+        let quote_vault_data = &accounts[pool_state.quote_vault_index].data.borrow();
+        u64::from_le_bytes(quote_vault_data[64..72].try_into().unwrap())
+    };
     
     if base_reserve == 0 || quote_reserve == 0 {
         return Err(ErrorCode::ZeroLiquidity.into());
@@ -84,7 +88,8 @@ pub fn parse_raydium_pool_data(
     let swap_fee_denominator = u64::from_le_bytes(pool_data[184..192].try_into().unwrap());
     let base_need_take_pnl = u64::from_le_bytes(pool_data[192..200].try_into().unwrap());
     let quote_need_take_pnl = u64::from_le_bytes(pool_data[200..208].try_into().unwrap());
-
+    
+    drop(pool_data);
 
 
     pool_state.base_mint = base_mint;

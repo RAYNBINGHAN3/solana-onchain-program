@@ -13,11 +13,12 @@ pub fn execute_dammv2_swap<'info>(
     trade_amount: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
+    wsol_mint: Pubkey,
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
 
 
-    let wsol_mint = ctx.accounts.wsol_mint.key();
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
 
     // // 确定token a和b的mint和program (保持不变，因为DAMM_V2的a/b是固定的)
     let (token_a_mint, token_b_mint, token_a_program, token_b_program) =
