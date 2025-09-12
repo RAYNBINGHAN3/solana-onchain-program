@@ -7,6 +7,7 @@ use crate::optimalamt::OptimizationResult;
 use crate::swap::{
     clmm::execute_clmm_swap, cpmm::execute_cpmm_swap, dammv2::execute_dammv2_swap, 
     dlmm::execute_dlmm_swap, pump::execute_pump_swap, raydium::execute_raydium_swap,
+    whirlpool::execute_whirlpool_swap,
 };
 use crate::utils::errors::ErrorCode;
 
@@ -186,7 +187,16 @@ fn execute_buy_swap<'info>(
         ParsedPoolState::CLMM { state, .. } => execute_clmm_swap(
             state,
             analysis.best_token_mint_index.unwrap(),
-            analysis.token_program_index.unwrap(),
+            analysis.mint_token_account_index.unwrap(),
+            wsol_amount,
+            accounts,
+            ctx,
+            true,
+        ),
+        ParsedPoolState::WHIRLPOOL { state } => execute_whirlpool_swap(
+            state,
+            analysis.token_program_index.unwrap(),  
+            analysis.best_token_mint_index.unwrap(),
             analysis.mint_token_account_index.unwrap(),
             wsol_amount,
             accounts,
@@ -291,7 +301,16 @@ fn execute_sell_swap<'info>(
         ParsedPoolState::CLMM { state, .. } => execute_clmm_swap(
             state,
             analysis.best_token_mint_index.unwrap(),
+            analysis.mint_token_account_index.unwrap(),
+            token_amount_balance,
+            accounts,
+            ctx,
+            false,
+        ),
+        ParsedPoolState::WHIRLPOOL { state } => execute_whirlpool_swap(
+            state,
             analysis.token_program_index.unwrap(),
+            analysis.best_token_mint_index.unwrap(),
             analysis.mint_token_account_index.unwrap(),
             token_amount_balance,
             accounts,

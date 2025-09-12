@@ -3,7 +3,6 @@ use crate::ComparePrices;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
-use crate::utils::utils::is_token_2022;
  
 
 /// 执行DLMM交易 (买入或卖出)

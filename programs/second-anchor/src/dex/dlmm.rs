@@ -320,51 +320,51 @@ pub fn calculate_volatility_accumulator(pool_state: &DlmmPoolState, active_id: i
     Ok(volatility_accumulator)
 }
 
-/// 从bin array中读取指定bin_id的价格
-/// 直接定位到bin位置，读取Q64.64格式的价格
-fn read_bin_price_from_array(bin_array_account: &AccountInfo, bin_id: i32) -> Result<u128> {
-    require!(
-        bin_array_account.owner == &dlmm_program_id::ID,
-        ErrorCode::InvalidPoolOwner
-    );
+// /// 从bin array中读取指定bin_id的价格
+// /// 直接定位到bin位置，读取Q64.64格式的价格
+// fn read_bin_price_from_array(bin_array_account: &AccountInfo, bin_id: i32) -> Result<u128> {
+//     require!(
+//         bin_array_account.owner == &dlmm_program_id::ID,
+//         ErrorCode::InvalidPoolOwner
+//     );
 
-    let data = bin_array_account.data.borrow();
+//     let data = bin_array_account.data.borrow();
 
-    // 解析bin array index
-    let mut offset = 8;
-    let index_i64 = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-    let index = index_i64 as i32;
+//     // 解析bin array index
+//     let mut offset = 8;
+//     let index_i64 = i64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+//     let index = index_i64 as i32;
 
-    // 计算bin在array中的位置
-    let start_bin_id = index * MAX_BIN_PER_ARRAY as i32;
-    let end_bin_id = start_bin_id + MAX_BIN_PER_ARRAY as i32 - 1;
+//     // 计算bin在array中的位置
+//     let start_bin_id = index * MAX_BIN_PER_ARRAY as i32;
+//     let end_bin_id = start_bin_id + MAX_BIN_PER_ARRAY as i32 - 1;
 
-    // 检查bin_id是否在当前array范围内
-    if bin_id < start_bin_id || bin_id > end_bin_id {
-        msg!(
-            "bin_id: {} is out of range: {}",
-            bin_id,
-            bin_array_account.key
-        );
-        return Err(ErrorCode::BinIdOutOfRange.into());
-    }
+//     // 检查bin_id是否在当前array范围内
+//     if bin_id < start_bin_id || bin_id > end_bin_id {
+//         msg!(
+//             "bin_id: {} is out of range: {}",
+//             bin_id,
+//             bin_array_account.key
+//         );
+//         return Err(ErrorCode::BinIdOutOfRange.into());
+//     }
 
-    // 计算bin在array中的索引
-    let bin_index = (bin_id - start_bin_id) as usize;
+//     // 计算bin在array中的索引
+//     let bin_index = (bin_id - start_bin_id) as usize;
 
-    // 跳过header: index(8) + version(1) + padding(7) + lbPair(32) = 48字节
-    offset = 8 + 48;
+//     // 跳过header: index(8) + version(1) + padding(7) + lbPair(32) = 48字节
+//     offset = 8 + 48;
 
-    // 每个bin占144字节，price字段在偏移量16处，占16字节
-    let bin_offset = offset + bin_index * 144;
-    let price_offset = bin_offset + 16; // amount_x(8) + amount_y(8) = 16
+//     // 每个bin占144字节，price字段在偏移量16处，占16字节
+//     let bin_offset = offset + bin_index * 144;
+//     let price_offset = bin_offset + 16; // amount_x(8) + amount_y(8) = 16
 
-    // 读取Q64.64格式的价格
-    let price_bytes = &data[price_offset..price_offset + 16];
-    let price = u128::from_le_bytes(price_bytes.try_into().unwrap());
+//     // 读取Q64.64格式的价格
+//     let price_bytes = &data[price_offset..price_offset + 16];
+//     let price = u128::from_le_bytes(price_bytes.try_into().unwrap());
 
-    Ok(price)
-}
+//     Ok(price)
+// }
 
 /// 计算DLMM总费率 (完全按照SDK实现，不做任何假设)
 pub fn calculate_dlmm_total_fee_rate(pool_state: &mut DlmmPoolState) -> Result<()> {
@@ -909,13 +909,13 @@ fn get_max_amount_in(amount_y: u64, amount_x: u64, price: u128, swap_for_y: bool
     }
 }
 
-fn get_amount_in(amount_out: u64, price: u128, swap_for_y: bool) -> u64 {
-    if swap_for_y {
-        safe_shl_div_cast(amount_out.into(), price, SCALE_OFFSET, Rounding::Up) as u64
-    } else {
-        safe_mul_shr_cast(amount_out.into(), price, SCALE_OFFSET, Rounding::Up) as u64
-    }
-}
+// fn get_amount_in(amount_out: u64, price: u128, swap_for_y: bool) -> u64 {
+//     if swap_for_y {
+//         safe_shl_div_cast(amount_out.into(), price, SCALE_OFFSET, Rounding::Up) as u64
+//     } else {
+//         safe_mul_shr_cast(amount_out.into(), price, SCALE_OFFSET, Rounding::Up) as u64
+//     }
+// }
 
 fn get_amount_out(amount_in: u64, price: u128, swap_for_y: bool) -> u64 {
     if swap_for_y {

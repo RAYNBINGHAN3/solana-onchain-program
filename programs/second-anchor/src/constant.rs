@@ -9,7 +9,7 @@ pub const DAMMV2_ACCOUNT_COUNT: usize = 6; // program_id + event_authority + poo
 pub const PUMP_ACCOUNT_COUNT: usize = 16; // program_id + pool + global_config + event_authority + coin_creator_vault_ata + coin_creator_vault_authority + pump_fee_wallet + pump_fee_wallet_ata + global_vol_accumulator + user_vol_accumulator + system_program + associated_token_program + base_vault + quote_vault + fee_config + fee_program
 pub const RAYDIUM_ACCOUNT_COUNT: usize = 5; // program_id + event_authority + pool + base_vault + quote_vault
 pub const CLMM_ACCOUNT_COUNT: usize = 10; // program_id + pool + amm_config + observation_key + token_vault_0 + token_vault_1 + tick_array_minus_1 + tick_array_0 + tick_array_1 + bitmap_extension
-
+pub const WHIRLPOOL_ACCOUNT_COUNT: usize = 8; // program_id + pool + oracle + vault_a + vault_b + tick_array_0 + tick_array_1 + tick_array_2
 
 
 

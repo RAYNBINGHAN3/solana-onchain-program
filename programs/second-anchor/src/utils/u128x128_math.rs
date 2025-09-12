@@ -1,7 +1,6 @@
 use ruint::aliases::{U256, U512};
 use crate::utils::u64x64_math::{ONE, SCALE_OFFSET};
 use crate::constant::BASE_BPS;
-use anchor_lang::prelude::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rounding {

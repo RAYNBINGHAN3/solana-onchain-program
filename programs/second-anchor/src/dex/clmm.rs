@@ -4,10 +4,10 @@ use crate::utils::u256x256_match::{div_rounding_up_u256, mul_div_ceil_u256, mul_
 use crate::utils::u64x64_math::ONE;
 use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
-use std::collections::VecDeque;
+ 
 
 // 导入大数运算库
-use ruint::aliases::{U1024, U256};
+use ruint::aliases::{U1024, U256, U512};
 
 pub mod clmm_program_id {
     use super::*;
@@ -23,6 +23,7 @@ const FEE_RATE_DENOMINATOR: u32 = 1_000_000;
 const TICK_ARRAY_SIZE: i32 = 60;
 const TICK_ARRAY_BITMAP_SIZE: i32 = 512;
 const BIT_PRECISION: u32 = 16;
+const EXTENSION_TICKARRAY_BITMAP_SIZE: usize = 14;
 
 /// CLMM池状态数据结构
 #[derive(Debug, Clone)]
@@ -52,13 +53,211 @@ pub struct ClmmPoolState {
     pub trade_fee_rate: u64,
     pub price: u128,
 
-    pub tick_array_bitmap: [u64; 16],
+    pub tick_array_bitmap: Box<[u64; 16]>,
+}
+ 
+/// Bitmap Extension 数据结构 - 与Raydium SDK完全一致
+#[derive(Debug, Clone)]
+pub struct TickArrayBitmapExtension {
+    pub pool_id: Pubkey,
+    /// Packed initialized tick array state for start_tick_index is positive
+    pub positive_tick_array_bitmap: [[u64; 8]; EXTENSION_TICKARRAY_BITMAP_SIZE],
+    /// Packed initialized tick array state for start_tick_index is negative
+    pub negative_tick_array_bitmap: [[u64; 8]; EXTENSION_TICKARRAY_BITMAP_SIZE],
+}
+
+impl TickArrayBitmapExtension {
+    /// 解析bitmap extension账户数据
+    pub fn parse_from_account_info(account_info: &AccountInfo) -> Result<Option<Box<Self>>> {
+        if *account_info.owner != clmm_program_id::ID {
+            return Ok(None);
+        }
+
+        let data = account_info.try_borrow_data()?;
+        if data.len() < 8 + 32 + 64 * EXTENSION_TICKARRAY_BITMAP_SIZE * 2 {
+            return Err(ErrorCode::InvalidAccountData.into());
+        }
+
+        // 跳过discriminator (8 bytes)
+        let pool_id = Pubkey::try_from(&data[8..40]).map_err(|_| ErrorCode::InvalidAccountData)?;
+        
+        let mut positive_tick_array_bitmap = [[0u64; 8]; EXTENSION_TICKARRAY_BITMAP_SIZE];
+        let mut negative_tick_array_bitmap = [[0u64; 8]; EXTENSION_TICKARRAY_BITMAP_SIZE];
+
+        let mut offset = 40;
+        // 解析positive bitmap
+        for i in 0..EXTENSION_TICKARRAY_BITMAP_SIZE {
+            for j in 0..8 {
+                positive_tick_array_bitmap[i][j] = u64::from_le_bytes(
+                    data[offset..offset + 8].try_into().map_err(|_| ErrorCode::InvalidAccountData)?
+                );
+                offset += 8;
+            }
+        }
+        
+        // 解析negative bitmap
+        for i in 0..EXTENSION_TICKARRAY_BITMAP_SIZE {
+            for j in 0..8 {
+                negative_tick_array_bitmap[i][j] = u64::from_le_bytes(
+                    data[offset..offset + 8].try_into().map_err(|_| ErrorCode::InvalidAccountData)?
+                );
+                offset += 8;
+            }
+        }
+
+        Ok(Some(Box::new(Self {
+            pool_id,
+            positive_tick_array_bitmap,
+            negative_tick_array_bitmap,
+        })))
+    }
+
+    /// 检查tick array是否已初始化
+    pub fn check_tick_array_is_initialized(
+        &self,
+        tick_array_start_index: i32,
+        tick_spacing: u16,
+    ) -> Result<(bool, i32)> {
+        let (_, tickarray_bitmap) = self.get_bitmap(tick_array_start_index, tick_spacing)?;
+        let tick_array_offset_in_bitmap = Self::tick_array_offset_in_bitmap(tick_array_start_index, tick_spacing);
+        
+        if U512::from_limbs(tickarray_bitmap).bit(tick_array_offset_in_bitmap as usize) {
+            return Ok((true, tick_array_start_index));
+        }
+        Ok((false, tick_array_start_index))
+    }
+
+    /// 在一个bitmap中查找下一个初始化的tick array
+    pub fn next_initialized_tick_array_from_one_bitmap_extension(
+        &self,
+        last_tick_array_start_index: i32,
+        tick_spacing: u16,
+        zero_for_one: bool,
+    ) -> Result<(bool, i32)> {
+        let multiplier = (tick_spacing as i32) * TICK_ARRAY_SIZE;
+        let next_tick_array_start_index = if zero_for_one {
+            last_tick_array_start_index - multiplier
+        } else {
+            last_tick_array_start_index + multiplier
+        };
+        
+        let min_tick_array_start_index = get_array_start_index(MIN_TICK, tick_spacing);
+        let max_tick_array_start_index = get_array_start_index(MAX_TICK, tick_spacing);
+
+        if next_tick_array_start_index < min_tick_array_start_index
+            || next_tick_array_start_index > max_tick_array_start_index
+        {
+            return Ok((false, next_tick_array_start_index));
+        }
+
+        let (_, tickarray_bitmap) = self.get_bitmap(next_tick_array_start_index, tick_spacing)?;
+        
+        Ok(Self::next_initialized_tick_array_in_bitmap(
+            tickarray_bitmap,
+            next_tick_array_start_index,
+            tick_spacing,
+            zero_for_one,
+        ))
+    }
+
+    /// 在bitmap中查找下一个初始化的tick array - 静态方法
+    pub fn next_initialized_tick_array_in_bitmap(
+        tickarray_bitmap: [u64; 8],
+        next_tick_array_start_index: i32,
+        tick_spacing: u16,
+        zero_for_one: bool,
+    ) -> (bool, i32) {
+        let (bitmap_min_tick_boundary, bitmap_max_tick_boundary) = 
+            get_bitmap_tick_boundary(next_tick_array_start_index, tick_spacing);
+
+        let tick_array_offset_in_bitmap = Self::tick_array_offset_in_bitmap(next_tick_array_start_index, tick_spacing);
+        
+        if zero_for_one {
+            // tick从高到低查找
+            let offset_bit_map = U512::from_limbs(tickarray_bitmap) << (TICK_ARRAY_BITMAP_SIZE - 1 - tick_array_offset_in_bitmap);
+            
+            let next_bit = if offset_bit_map.is_zero() {
+                None
+            } else {
+                Some(offset_bit_map.leading_zeros() as u16)
+            };
+
+            if let Some(next_bit) = next_bit {
+                let next_array_start_index = next_tick_array_start_index 
+                    - (next_bit as i32) * (tick_spacing as i32) * TICK_ARRAY_SIZE;
+                (true, next_array_start_index)
+            } else {
+                (false, bitmap_min_tick_boundary)
+            }
+        } else {
+            // tick从低到高查找
+            let offset_bit_map = U512::from_limbs(tickarray_bitmap) >> tick_array_offset_in_bitmap;
+            
+            let next_bit = if offset_bit_map.is_zero() {
+                None
+            } else {
+                Some(offset_bit_map.trailing_zeros() as u16)
+            };
+            
+            if let Some(next_bit) = next_bit {
+                let next_array_start_index = next_tick_array_start_index
+                    + (next_bit as i32) * (tick_spacing as i32) * TICK_ARRAY_SIZE;
+                (true, next_array_start_index)
+            } else {
+                (false, bitmap_max_tick_boundary - (tick_spacing as i32) * TICK_ARRAY_SIZE)
+            }
+        }
+    }
+
+    /// 获取bitmap偏移量
+    fn get_bitmap_offset(tick_index: i32, tick_spacing: u16) -> Result<usize> {
+        Self::check_extension_boundary(tick_index, tick_spacing)?;
+        let ticks_in_one_bitmap = max_tick_in_tickarray_bitmap(tick_spacing);
+        let mut offset = tick_index.abs() / ticks_in_one_bitmap - 1;
+        if tick_index < 0 && tick_index.abs() % ticks_in_one_bitmap == 0 {
+            offset -= 1;
+        }
+        Ok(offset as usize)
+    }
+
+    /// 获取bitmap
+    fn get_bitmap(&self, tick_index: i32, tick_spacing: u16) -> Result<(usize, [u64; 8])> {
+        let offset = Self::get_bitmap_offset(tick_index, tick_spacing)?;
+        if tick_index < 0 {
+            Ok((offset, self.negative_tick_array_bitmap[offset]))
+        } else {
+            Ok((offset, self.positive_tick_array_bitmap[offset]))
+        }
+    }
+
+    /// 检查是否在extension边界内
+    pub fn check_extension_boundary(tick_index: i32, tick_spacing: u16) -> Result<()> {
+        let positive_tick_boundary = max_tick_in_tickarray_bitmap(tick_spacing);
+        
+        require!(MAX_TICK > positive_tick_boundary, ErrorCode::InvalidTickIndex);
+        require!(-positive_tick_boundary > MIN_TICK, ErrorCode::InvalidTickIndex);
+        
+        if tick_index >= -positive_tick_boundary && tick_index < positive_tick_boundary {
+            return Err(ErrorCode::InvalidTickArrayBoundary.into());
+        }
+        Ok(())
+    }
+
+    /// 计算tick array在bitmap中的偏移量
+    pub fn tick_array_offset_in_bitmap(tick_array_start_index: i32, tick_spacing: u16) -> i32 {
+        let m = tick_array_start_index.abs() % max_tick_in_tickarray_bitmap(tick_spacing);
+        let mut tick_array_offset_in_bitmap = m / ((tick_spacing as i32) * TICK_ARRAY_SIZE);
+        if tick_array_start_index < 0 && m != 0 {
+            tick_array_offset_in_bitmap = TICK_ARRAY_BITMAP_SIZE - tick_array_offset_in_bitmap;
+        }
+        tick_array_offset_in_bitmap
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct ClmmParams<'c, 'info> {
-    pub tick_arrays: Vec<&'c AccountInfo<'info>>,
-    pub bitmap_extension: &'c AccountInfo<'info>,
+pub struct ClmmParams {
+    pub tick_array_states: Box<Vec<TickArrayState>>,
+    pub bitmap_extension: Option<Box<TickArrayBitmapExtension>>, // 提前解析的bitmap extension
     pub sqrt_price_limit_x64: u128,
 }
 
@@ -70,7 +269,7 @@ struct SwapState {
     sqrt_price_x64: u128,
     tick: i32,
     // fee_growth_global_x64: u128,
-    fee_amount: u64,
+    // fee_amount: u64,
     liquidity: u128,
 }
 
@@ -81,9 +280,9 @@ struct StepComputations {
     tick_next: i32,
     initialized: bool,
     sqrt_price_next_x64: u128,
-    amount_in: u64,
-    amount_out: u64,
-    fee_amount: u64,
+    // amount_in: u64,
+    // amount_out: u64,
+    // fee_amount: u64,
 }
 
 /// 交换步骤结果
@@ -104,12 +303,20 @@ pub struct TickState {
     // pub fee_growth_outside_0_x64: u128,
     // pub fee_growth_outside_1_x64: u128,
     // pub reward_growths_outside_x64: [u128; 3],
-    pub initialized: bool,
+    // pub initialized: bool,
 }
 
 impl TickState {
+    pub fn new(tick: i32, liquidity_net: i128, liquidity_gross: u128) -> Self {
+        Self {
+            tick,
+            liquidity_net,
+            liquidity_gross,
+        }
+    }
+
     pub fn is_initialized(&self) -> bool {
-        self.initialized
+        self.liquidity_gross > 0
     }
 
     // pub fn cross(
@@ -134,62 +341,69 @@ impl TickState {
 pub struct TickArrayState {
     pub start_tick_index: i32,
     pub ticks: Vec<TickState>,
-    pub pool_id: Pubkey,
+    // pub pool_id: Pubkey,
 }
 
 impl TickArrayState {
+    pub fn new(start_tick_index: i32, ticks: Vec<TickState>) -> Self {
+        Self {
+            start_tick_index,
+            ticks,
+            // pool_id,
+        }
+    }
+
     pub fn next_initialized_tick(
         &self,
         tick: i32,
         tick_spacing: u16,
         zero_for_one: bool,
-    ) -> Result<Option<TickState>> {
-        let tick_spacing = tick_spacing as i32;
+    ) -> Result<Option<&TickState>> {
+        // 检查当前tick是否在这个tick array范围内
+        let current_tick_array_start_index = get_array_start_index(tick, tick_spacing);
+        if current_tick_array_start_index != self.start_tick_index {
+            return Ok(None);
+        }
+
+        // 关键修复：直接在数组索引上操作，而不是tick值！
+        let mut offset_in_array = (tick - self.start_tick_index) / tick_spacing as i32;
 
         if zero_for_one {
-            // 向左查找
-            let mut current_tick = tick;
-            while current_tick >= self.start_tick_index {
-                let tick_index = (current_tick - self.start_tick_index) / tick_spacing;
-                if tick_index >= 0 && tick_index < TICK_ARRAY_SIZE {
-                    let tick_state = &self.ticks[tick_index as usize];
-                    if tick_state.is_initialized() && current_tick < tick {
-                        return Ok(Some(*tick_state));
-                    }
+            // 向左查找 - 直接操作数组索引，最多60次循环
+            while offset_in_array >= 0 {
+                if self.ticks[offset_in_array as usize].is_initialized() && 
+                   self.ticks[offset_in_array as usize].tick < tick {
+                    return Ok(Some(&self.ticks[offset_in_array as usize]));
                 }
-                current_tick -= tick_spacing;
+                offset_in_array -= 1;  // 关键：只减1，不是减tick_spacing
             }
         } else {
-            // 向右查找
-            let mut current_tick = tick + tick_spacing;
-            while current_tick < self.start_tick_index + TICK_ARRAY_SIZE * tick_spacing {
-                let tick_index = (current_tick - self.start_tick_index) / tick_spacing;
-                if tick_index >= 0 && tick_index < TICK_ARRAY_SIZE {
-                    let tick_state = &self.ticks[tick_index as usize];
-                    if tick_state.is_initialized() {
-                        return Ok(Some(*tick_state));
-                    }
+            // 向右查找 - 直接操作数组索引，最多60次循环
+            offset_in_array += 1;
+            while offset_in_array < TICK_ARRAY_SIZE {
+                if self.ticks[offset_in_array as usize].is_initialized() {
+                    return Ok(Some(&self.ticks[offset_in_array as usize]));
                 }
-                current_tick += tick_spacing;
+                offset_in_array += 1;  // 关键：只加1，不是加tick_spacing
             }
         }
 
         Ok(None)
     }
 
-    pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<TickState> {
+    pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<&TickState> {
         if zero_for_one {
             // 从右到左查找
             for i in (0..TICK_ARRAY_SIZE).rev() {
                 if self.ticks[i as usize].is_initialized() {
-                    return Ok(self.ticks[i as usize]);
+                    return Ok(&self.ticks[i as usize]);
                 }
             }
         } else {
             // 从左到右查找
             for i in 0..TICK_ARRAY_SIZE {
                 if self.ticks[i as usize].is_initialized() {
-                    return Ok(self.ticks[i as usize]);
+                    return Ok(&self.ticks[i as usize]);
                 }
             }
         }
@@ -258,7 +472,7 @@ pub fn parse_clmm_pool_data(
     };
 
     pool_state.trade_fee_rate = trade_fee_rate as u64;
-    pool_state.tick_array_bitmap = tick_array_bitmap;
+    pool_state.tick_array_bitmap = Box::new(tick_array_bitmap);
     // pool_state.protocol_fee_rate = protocol_fee_rate;
     // pool_state.fund_fee_rate = fund_fee_rate;
 
@@ -296,12 +510,15 @@ pub fn calculate_clmm_price(pool_state: &mut ClmmPoolState, wsol_mint: Pubkey) -
     Ok(())
 }
 
-/// 解析 Tick Array 状态 - 修正版本
-fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<TickArrayState> {
+/// 解析 Tick Array 状态 - 返回Option，未初始化时返回None
+fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<Option<TickArrayState>> {
     let data = tick_array_info.try_borrow_data()?;
 
-    // 验证程序所有者
-    require_keys_eq!(*tick_array_info.owner, clmm_program_id::ID);
+    // 验证程序所有者 - 未初始化时跳过
+    if *tick_array_info.owner != clmm_program_id::ID {
+        msg!("{} not initialized", tick_array_info.key());
+        return Ok(None);
+    }
 
     // TickArrayState 布局：
     // discriminator: 8 bytes
@@ -312,11 +529,11 @@ fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<TickArrayStat
     // recent_epoch: 8 bytes (offset: 9165)
     // padding: 107 bytes (offset: 9173)
 
-    let pool_id = Pubkey::new_from_array(
-        data[8..40]
-            .try_into()
-            .map_err(|_| ErrorCode::InvalidAccountData)?,
-    );
+    // let pool_id = Pubkey::new_from_array(
+    //     data[8..40]
+    //         .try_into()
+    //         .map_err(|_| ErrorCode::InvalidAccountData)?,
+    // );
 
     let start_tick_index = i32::from_le_bytes(
         data[40..44]
@@ -326,8 +543,8 @@ fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<TickArrayStat
 
     let mut ticks = Vec::with_capacity(TICK_ARRAY_SIZE as usize);
 
-    // 每个 TickState 的大小是 152 字节
-    const TICK_STATE_SIZE: usize = 152;
+   
+    const TICK_STATE_SIZE: usize = 168;
 
     for i in 0..TICK_ARRAY_SIZE {
         let offset = 44 + i as usize * TICK_STATE_SIZE;
@@ -374,24 +591,13 @@ fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<TickArrayStat
         //     );
         // }
 
-        let initialized = liquidity_gross > 0;
-
-        ticks.push(TickState {
-            tick,
-            liquidity_net,
-            liquidity_gross,
-            // fee_growth_outside_0_x64,
-            // fee_growth_outside_1_x64,
-            // reward_growths_outside_x64,
-            initialized,
-        });
+        // let initialized = liquidity_gross > 0;
+ 
+        ticks.push(TickState::new(tick, liquidity_net, liquidity_gross));
     }
-
-    Ok(TickArrayState {
-        start_tick_index,
-        ticks,
-        pool_id,
-    })
+    
+   
+    Ok(Some(TickArrayState::new(start_tick_index, ticks)))
 }
 
 
@@ -404,14 +610,10 @@ pub fn clmm_quote_exact_input_wsol(
     token_mint_info: &AccountInfo,
     clmm_params: &Option<ClmmParams>,
 ) -> Result<u64> {
-    if wsol_amount_in == 0 {
+    if wsol_amount_in == 0 || pool_state.liquidity == 0{
         return Ok(0);
     }
-
-    if pool_state.liquidity == 0 {
-        msg!("Skip CLMM zero liquidity");
-        return Ok(0);
-    }
+   
 
     let params = clmm_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
 
@@ -424,15 +626,42 @@ pub fn clmm_quote_exact_input_wsol(
         return Err(ErrorCode::InvalidTokenPair.into());
     };
 
-    // 执行交换计算
+    let sqrt_price_limit_x64 = if params.sqrt_price_limit_x64 == 0 {
+        if zero_for_one {
+            MIN_SQRT_PRICE_X64
+        } else {
+            MAX_SQRT_PRICE_X64
+        }
+    } else {
+        params.sqrt_price_limit_x64
+    };
+
+    // 验证价格限制
+    if zero_for_one {
+        require!(
+            sqrt_price_limit_x64 < pool_state.sqrt_price_x64
+                && sqrt_price_limit_x64 >= MIN_SQRT_PRICE_X64,
+            ErrorCode::InvalidSqrtPriceLimit
+        );
+    } else {
+        require!(
+            sqrt_price_limit_x64 > pool_state.sqrt_price_x64
+                && sqrt_price_limit_x64 <= MAX_SQRT_PRICE_X64,
+            ErrorCode::InvalidSqrtPriceLimit
+        );
+    }
+
+   
+
+    // 执行交换计算 - 直接使用原始数据，避免大量克隆造成栈溢出
+    // let mut tick_array_states_clone = params.tick_array_states.clone();
     let (amount_0, amount_1) = clmm_swap_internal(
         pool_state,
-        &params.tick_arrays,
-        params.bitmap_extension,
+        &params.tick_array_states,
+        &params.bitmap_extension, // 使用预解析的bitmap extension
         wsol_amount_in,
-        params.sqrt_price_limit_x64,
-        zero_for_one,
-        true, // is_base_input
+        sqrt_price_limit_x64,
+        zero_for_one
     )?;
 
     let token_amount_out = if zero_for_one { amount_1 } else { amount_0 };
@@ -455,14 +684,11 @@ pub fn clmm_quote_exact_input_token(
     token_mint_info: &AccountInfo,
     clmm_params: &Option<ClmmParams>,
 ) -> Result<u64> {
-    if token_amount_in == 0 {
+    
+    if token_amount_in == 0 || pool_state.liquidity == 0{
         return Ok(0);
     }
-
-    if pool_state.liquidity == 0 {
-        msg!("Skip CLMM zero liquidity");
-        return Ok(0);
-    }
+     
 
     let params = clmm_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
 
@@ -482,44 +708,14 @@ pub fn clmm_quote_exact_input_token(
         return Err(ErrorCode::InvalidTokenPair.into());
     };
 
-    // 执行交换计算
-    let (amount_0, amount_1) = clmm_swap_internal(
-        pool_state,
-        &params.tick_arrays,
-        params.bitmap_extension,
-        actual_token_amount_in,
-        params.sqrt_price_limit_x64, // sqrt_price_limit = 0 表示无价格限制
-        zero_for_one,
-        true, // is_base_input
-    )?;
-
-    let wsol_amount_out = if zero_for_one { amount_1 } else { amount_0 };
-
-    Ok(wsol_amount_out)
-}
-
-/// CLMM内部交换计算 - 完整准确版本
-fn clmm_swap_internal(
-    pool_state: &ClmmPoolState,
-    tick_arrays: &Vec<&AccountInfo>,
-    bitmap_extension: &AccountInfo,
-    amount_specified: u64,
-    sqrt_price_limit_x64: u128,
-    zero_for_one: bool,
-    is_base_input: bool,
-) -> Result<(u64, u64)> {
-    if amount_specified == 0 {
-        return Err(ErrorCode::ZeroAmountSpecified.into());
-    }
-
-    let sqrt_price_limit_x64 = if sqrt_price_limit_x64 == 0 {
+    let sqrt_price_limit_x64 = if params.sqrt_price_limit_x64 == 0 {
         if zero_for_one {
             MIN_SQRT_PRICE_X64
         } else {
             MAX_SQRT_PRICE_X64
         }
     } else {
-        sqrt_price_limit_x64
+        params.sqrt_price_limit_x64
     };
 
     // 验证价格限制
@@ -536,67 +732,108 @@ fn clmm_swap_internal(
             ErrorCode::InvalidSqrtPriceLimit
         );
     }
+ 
 
-    let liquidity_start = pool_state.liquidity;
+    // 执行交换计算 - 直接使用原始数据，避免大量克隆造成栈溢出
+    // let mut tick_array_states_clone = params.tick_array_states.clone();
+    let (amount_0, amount_1) = clmm_swap_internal(
+        pool_state,
+        &params.tick_array_states,
+        &params.bitmap_extension, // 使用预解析的bitmap extension
+        actual_token_amount_in,
+        sqrt_price_limit_x64, // sqrt_price_limit = 0 表示无价格限制
+        zero_for_one,
+        // true, // is_base_input
+    )?;
 
-    // 初始化交换状态
-    let mut state = SwapState {
+    let wsol_amount_out = if zero_for_one { amount_1 } else { amount_0 };
+
+    Ok(wsol_amount_out)
+}
+
+
+pub fn parse_tick_array_states(tick_arrays: &Vec<&AccountInfo>) -> Result<Vec<TickArrayState>> {
+  
+    // 创建 tick array 队列 - 全部解析
+    let mut tick_array_states: Vec<TickArrayState> = Vec::new();
+    for tick_array_info in tick_arrays {
+        if let Some(tick_array_state) = parse_tick_array_state(tick_array_info)? {
+            tick_array_states.push(tick_array_state);
+        }
+    }
+
+    Ok(tick_array_states)
+}
+
+
+/// CLMM内部交换计算 - 完整准确版本
+fn clmm_swap_internal(
+    pool_state: &ClmmPoolState,
+    tick_array_states: &Vec<TickArrayState>,
+    bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
+    amount_specified: u64,
+    sqrt_price_limit_x64: u128,
+    zero_for_one: bool,
+) -> Result<(u64, u64)> {
+    if amount_specified == 0 {
+        return Err(ErrorCode::ZeroAmountSpecified.into());
+    }
+   
+    // 初始化交换状态 - 使用Box减少栈使用
+    let mut state = Box::new(SwapState {
         amount_specified_remaining: amount_specified,
         amount_calculated: 0,
         sqrt_price_x64: pool_state.sqrt_price_x64,
         tick: pool_state.tick_current,
-        // fee_growth_global_x64: if zero_for_one {
-        //     pool_state.fee_growth_global_0_x64
-        // } else {
-        //     pool_state.fee_growth_global_1_x64
-        // },
-        fee_amount: 0,
-        liquidity: liquidity_start,
-    };
+        // fee_amount: 0,
+        liquidity: pool_state.liquidity,
+    });
 
+ 
     // 获取第一个有效的 tick array
-    let (mut is_match_pool_current_tick_array, first_valid_tick_array_start_index) =
+    let (mut is_match_pool_current_tick_array, mut current_valid_tick_array_start_index) =
         get_first_initialized_tick_array(pool_state, bitmap_extension, zero_for_one)?;
-    let mut current_valid_tick_array_start_index = first_valid_tick_array_start_index;
+    // let mut current_valid_tick_array_start_index = first_valid_tick_array_start_index;
+ 
 
-    // 创建 tick array 队列
-    let mut tick_array_states: VecDeque<TickArrayState> = VecDeque::new();
-    for tick_array_info in tick_arrays {
-        let tick_array_state = parse_tick_array_state(tick_array_info)?;
-        tick_array_states.push_back(tick_array_state);
-    }
-
-    let mut tick_array_current = tick_array_states.pop_front().unwrap();
-
-    // 找到第一个有效的 tick array
-    for _ in 0..tick_array_states.len() {
-        if tick_array_current.start_tick_index == current_valid_tick_array_start_index {
+    // 避免大量克隆，使用索引访问
+    let mut current_tick_array_index = 0;
+     
+    // 找到第一个有效的 tick array - 使用索引而不是pop
+    while current_tick_array_index < tick_array_states.len() {
+        if tick_array_states[current_tick_array_index].start_tick_index == current_valid_tick_array_start_index {
             break;
         }
-        tick_array_current = tick_array_states
-            .pop_front()
-            .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+        current_tick_array_index += 1;
     }
-
+    
+    // 检查是否找到匹配的tick array
+    if current_tick_array_index >= tick_array_states.len() {
+        msg!("No match tick array1");
+        return Ok((0, 0));
+    }
+    
+    let mut tick_array_current = &tick_array_states[current_tick_array_index];
+    
     // 主交换循环
-    while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
-        let mut step = StepComputations::default();
+    'outer: while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
+        let mut step = Box::new(StepComputations::default());
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
-        // 查找下一个初始化的 tick
+        // 查找下一个初始化的 tick - 按照Raydium方式
         let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
             .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
         {
-            Box::new(tick_state)
+            Box::new(*tick_state) 
         } else {
             if !is_match_pool_current_tick_array {
                 is_match_pool_current_tick_array = true;
-                Box::new(tick_array_current.first_initialized_tick(zero_for_one)?)
+                Box::new(*tick_array_current.first_initialized_tick(zero_for_one)?) 
+                //比如预先建池时），会先初始化一段 TickArray，但里面的 tick 全是空的，直到有人往这个区间加流动性时，才会看到 tick 被真正写入
             } else {
                 Box::new(TickState::default())
             }
         };
-
         // 如果找不到初始化的 tick，切换到下一个 tick array
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = next_initialized_tick_array_start_index(
@@ -610,19 +847,23 @@ fn clmm_swap_internal(
             }
 
             while tick_array_current.start_tick_index != next_initialized_tickarray_index.unwrap() {
-                tick_array_current = tick_array_states
-                    .pop_front()
-                    .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+                current_tick_array_index += 1;
+                if current_tick_array_index < tick_array_states.len() {
+                    tick_array_current = &tick_array_states[current_tick_array_index];
+                } else {
+                    // 没有更多tick array了，按照当前输出返回
+                    msg!("No more tick array");
+                    break 'outer;
+                }
             }
             current_valid_tick_array_start_index = next_initialized_tickarray_index.unwrap();
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
-            next_initialized_tick = Box::new(first_initialized_tick);
+            next_initialized_tick = Box::new(*first_initialized_tick);
         }
 
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
-
         // 边界检查
         if step.tick_next < MIN_TICK {
             step.tick_next = MIN_TICK;
@@ -634,11 +875,13 @@ fn clmm_swap_internal(
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
         {
-            sqrt_price_limit_x64
+            sqrt_price_limit_x64 
+            // msg!("sqrt_price_next_x64 out of range");
+            // 这里需要是满足pool的刻度价格 我提供的是随机价格 所以这里直接break退出 
+            // break;
         } else {
             step.sqrt_price_next_x64
         };
-
         // 计算交换步骤
         let swap_step = compute_swap_step(
             step.sqrt_price_start_x64,
@@ -646,47 +889,35 @@ fn clmm_swap_internal(
             state.liquidity,
             state.amount_specified_remaining,
             pool_state.trade_fee_rate,
-            is_base_input,
+            true, // allways true
             zero_for_one,
         )?;
 
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
-        step.amount_in = swap_step.amount_in;
-        step.amount_out = swap_step.amount_out;
-        step.fee_amount = swap_step.fee_amount;
+        // step.amount_in = swap_step.amount_in;
+        // step.amount_out = swap_step.amount_out;
+        // step.fee_amount = swap_step.fee_amount;
 
         // 更新状态
-        if is_base_input {
-            state.amount_specified_remaining = state
-                .amount_specified_remaining
-                .checked_sub(step.amount_in + step.fee_amount)
-                .unwrap();
-            state.amount_calculated = state
-                .amount_calculated
-                .checked_add(step.amount_out)
-                .unwrap();
-        } else {
-            state.amount_specified_remaining = state
-                .amount_specified_remaining
-                .checked_sub(step.amount_out)
-                .unwrap();
-            let step_amount_calculate = step.amount_in.checked_add(step.fee_amount).unwrap();
-            state.amount_calculated = state
-                .amount_calculated
-                .checked_add(step_amount_calculate)
-                .unwrap();
-        }
+        state.amount_specified_remaining = state
+            .amount_specified_remaining
+            .checked_sub(swap_step.amount_in + swap_step.fee_amount)
+            .unwrap();
+        state.amount_calculated = state
+            .amount_calculated
+            .checked_add(swap_step.amount_out)
+            .unwrap();
 
         // 更新费用增长
-        if state.liquidity > 0 {
+        // if state.liquidity > 0 {
             // let fee_growth_global_x64_delta =
             //     safe_mul_div_cast(step.fee_amount as u128, ONE, state.liquidity, Rounding::Up);
             // state.fee_growth_global_x64 = state
             //     .fee_growth_global_x64
             //     .checked_add(fee_growth_global_x64_delta)
             //     .unwrap();
-            state.fee_amount = state.fee_amount.checked_add(step.fee_amount).unwrap();
-        }
+            // state.fee_amount = state.fee_amount.checked_add(swap_step.fee_amount).unwrap();
+        // }
 
         // 处理 tick 跨越
         if state.sqrt_price_x64 == step.sqrt_price_next_x64 {
@@ -736,7 +967,9 @@ fn clmm_swap_internal(
     };
 
     Ok((amount_0, amount_1))
+
 }
+
 
 // ======================== 数学计算库函数 ========================
 
@@ -919,47 +1152,52 @@ pub fn calculate_amount_in_range(
 /// 获取第一个初始化的 tick array - 完整实现
 fn get_first_initialized_tick_array(
     pool_state: &ClmmPoolState,
-    _tickarray_bitmap_extension: &AccountInfo,
+    bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
     zero_for_one: bool,
 ) -> Result<(bool, i32)> {
-    // 检查当前tick对应的tick array是否初始化
-    let (is_initialized, start_index) = check_current_tick_array_is_initialized(
-        U1024::from_limbs(pool_state.tick_array_bitmap),
-        pool_state.tick_current,
-        pool_state.tick_spacing,
-    )?;
+    let current_tick_array_start_index = get_array_start_index(pool_state.tick_current, pool_state.tick_spacing);
+    
+    // 检查是否超出默认bitmap范围
+    let (is_initialized, start_index) = if is_overflow_default_tickarray_bitmap(pool_state.tick_current, pool_state.tick_spacing) {
+        // 使用预解析的extension bitmap
+        if let Some(ext) = bitmap_extension {
+            ext.check_tick_array_is_initialized(current_tick_array_start_index, pool_state.tick_spacing)?
+        } else {
+            return Err(ErrorCode::InvalidAccountData.into());
+        }
+    } else {
+        // 使用默认bitmap
+        check_current_tick_array_is_initialized(
+            U1024::from_limbs(*pool_state.tick_array_bitmap),
+            pool_state.tick_current,
+            pool_state.tick_spacing,
+        )?
+    };
 
     if is_initialized {
         return Ok((true, start_index));
     }
 
     // 如果当前tick array未初始化，查找下一个初始化的tick array
-    let (is_found, next_start_index) = next_initialized_tick_array_start_index_internal(
-        U1024::from_limbs(pool_state.tick_array_bitmap),
-        start_index,
-        pool_state.tick_spacing,
+    let next_start_index = next_initialized_tick_array_start_index(
+        pool_state,
+        bitmap_extension,
+        current_tick_array_start_index,
         zero_for_one,
+    )?;
+    
+    require!(
+        next_start_index.is_some(),
+        ErrorCode::LiquidityInsufficient
     );
-
-    if is_found {
-        return Ok((false, next_start_index));
-    }
-
-    //我们不考虑extension bitmap 如果找不到就不找了
-    msg!("Not found in bit map may in extension bitmap");
-    // 如果在池子bitmap中找不到，尝试在extension bitmap中查找
-    // if let Some(extension_info) = tickarray_bitmap_extension {
-    //     // 这里需要解析extension bitmap，暂时返回错误
-    //     return Err(ErrorCode::LiquidityInsufficient.into());
-    // }
-
-    return Ok((false, start_index));
+    
+    Ok((false, next_start_index.unwrap()))
 }
 
 /// 查找下一个初始化的 tick array 起始索引 - 完整实现
 fn next_initialized_tick_array_start_index(
     pool_state: &ClmmPoolState,
-    _tickarray_bitmap_extension: &AccountInfo,
+    bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
     mut last_tick_array_start_index: i32,
     zero_for_one: bool,
 ) -> Result<Option<i32>> {
@@ -968,44 +1206,39 @@ fn next_initialized_tick_array_start_index(
         get_array_start_index(last_tick_array_start_index, pool_state.tick_spacing);
 
     loop {
-        // 在池子的bitmap中查找
+        // 首先在池子的默认bitmap中查找
         let (is_found, start_index) = next_initialized_tick_array_start_index_internal(
-            U1024::from_limbs(pool_state.tick_array_bitmap),
+            U1024::from_limbs(*pool_state.tick_array_bitmap),
             last_tick_array_start_index,
             pool_state.tick_spacing,
             zero_for_one,
         );
 
-      
-
         if is_found {
             return Ok(Some(start_index));
         }
+        
+        last_tick_array_start_index = start_index;
 
-          last_tick_array_start_index = start_index;
+        // 如果在默认bitmap中没找到，尝试预解析的extension bitmap
+        if let Some(ext) = bitmap_extension {
+            let (is_found, start_index) = ext.next_initialized_tick_array_from_one_bitmap_extension(
+                last_tick_array_start_index,
+                pool_state.tick_spacing,
+                zero_for_one,
+            )?;
+            
+            if is_found {
+                return Ok(Some(start_index));
+            }
+            
+            last_tick_array_start_index = start_index;
+        }
 
-        // // 如果没有extension bitmap，返回None
-        // if tickarray_bitmap_extension.is_none() {
-        //     return Ok(None);
-        // }
-
-        // // 在extension bitmap中查找（暂时简化实现）
-        // // 实际需要解析extension bitmap并调用相应的查找函数
-        // let multiplier = (pool_state.tick_spacing as i32) * TICK_ARRAY_SIZE;
-        // let next_index = if zero_for_one {
-        //     last_tick_array_start_index - multiplier
-        // } else {
-        //     last_tick_array_start_index + multiplier
-        // };
-
-        // if next_index < MIN_TICK || next_index > MAX_TICK {
-        //     return Ok(None);
-        // }
-
-        // last_tick_array_start_index = next_index;
-
-        // 暂时返回None，实际需要实现extension bitmap查找
-        return Ok(None);
+        if last_tick_array_start_index < -443636 || last_tick_array_start_index > 443636
+        {
+            return Ok(None);
+        }
     }
 }
 
@@ -1259,38 +1492,11 @@ fn get_next_sqrt_price_from_input(
     }
 }
 
-/// 从输出计算下一个 sqrt_price - 使用U256高精度计算
-fn get_next_sqrt_price_from_output(
-    sqrt_price_x64: u128,
-    liquidity: u128,
-    amount_out: u64,
-    zero_for_one: bool,
-) -> Result<u128> {
-    require!(sqrt_price_x64 > 0, ErrorCode::InvalidSqrtPrice);
-    require!(liquidity > 0, ErrorCode::LiquidityInsufficient);
-
-    if zero_for_one {
-        // token0 -> token1: 使用 get_next_sqrt_price_from_amount_1_rounding_down
-        Ok(get_next_sqrt_price_from_amount_1_rounding_down(
-            sqrt_price_x64,
-            liquidity,
-            amount_out,
-            false,
-        ))
-    } else {
-        // token1 -> token0: 使用 get_next_sqrt_price_from_amount_0_rounding_up
-        Ok(get_next_sqrt_price_from_amount_0_rounding_up(
-            sqrt_price_x64,
-            liquidity,
-            amount_out,
-            false,
-        ))
-    }
-}
+ 
 
 /// 计算 delta amount 0 (unsigned) - 使用U256高精度计算
 /// 公式: Δx = L * (√P_upper - √P_lower) / (√P_upper * √P_lower)
-fn get_delta_amount_0_unsigned(
+pub fn get_delta_amount_0_unsigned(
     sqrt_price_a_x64: u128,
     sqrt_price_b_x64: u128,
     liquidity: u128,
@@ -1333,7 +1539,7 @@ fn get_delta_amount_0_unsigned(
 
 /// 计算 delta amount 1 (unsigned) - 使用U256高精度计算
 /// 公式: Δy = L * (√P_upper - √P_lower) / Q64
-fn get_delta_amount_1_unsigned(
+pub fn get_delta_amount_1_unsigned(
     sqrt_price_a_x64: u128,
     sqrt_price_b_x64: u128,
     liquidity: u128,
@@ -1441,15 +1647,15 @@ fn next_initialized_tick_array_start_index_internal(
         compressed -= 1;
     }
 
-    let bit_pos = compressed.abs();
+    // let bit_pos = compressed.abs();
 
     if zero_for_one {
         // tick从高到低
         // 从高位到低位查找
-        let offset_bit_map = bit_map << (1024 - bit_pos - 1);
+        let offset_bit_map = bit_map << (1024 - compressed.abs() - 1);
         let next_bit = most_significant_bit(offset_bit_map);
         if let Some(next_bit) = next_bit {
-            let next_array_start_index = (bit_pos - next_bit as i32 - 512) * multiplier;
+            let next_array_start_index = (compressed.abs() - next_bit as i32 - 512) * multiplier;
             (true, next_array_start_index)
         } else {
             // 找不到，到边界
@@ -1458,10 +1664,10 @@ fn next_initialized_tick_array_start_index_internal(
     } else {
         // tick从低到高
         // 从低位到高位查找
-        let offset_bit_map = bit_map >> bit_pos;
+        let offset_bit_map = bit_map >> compressed.abs();
         let next_bit = least_significant_bit(offset_bit_map);
         if let Some(next_bit) = next_bit {
-            let next_array_start_index = (bit_pos + next_bit as i32 - 512) * multiplier;
+            let next_array_start_index = (compressed.abs() + next_bit as i32 - 512) * multiplier;
             (true, next_array_start_index)
         } else {
             // 找不到，到边界
@@ -1494,11 +1700,74 @@ fn max_tick_in_tickarray_bitmap(tick_spacing: u16) -> i32 {
 }
 
 /// 获取tick array的起始索引
-fn get_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
-    let multiplier = (tick_spacing as i32) * TICK_ARRAY_SIZE;
-    if tick_index >= 0 {
-        (tick_index / multiplier) * multiplier
+pub fn get_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
+    let ticks_in_array = TICK_ARRAY_SIZE * i32::from(tick_spacing);
+    let mut start = tick_index / ticks_in_array;
+    if tick_index < 0 && tick_index % ticks_in_array != 0 {
+        start = start - 1
+    }
+    start * ticks_in_array
+}
+
+/// 获取bitmap边界 - 与SDK一致
+fn get_bitmap_tick_boundary(tick_array_start_index: i32, tick_spacing: u16) -> (i32, i32) {
+    let ticks_in_one_bitmap = max_tick_in_tickarray_bitmap(tick_spacing);
+    
+    if tick_array_start_index >= 0 {
+        let bitmap_start = (tick_array_start_index / ticks_in_one_bitmap) * ticks_in_one_bitmap;
+        (bitmap_start, bitmap_start + ticks_in_one_bitmap)
     } else {
-        ((tick_index + 1) / multiplier - 1) * multiplier
+        let bitmap_end = ((tick_array_start_index + 1) / ticks_in_one_bitmap) * ticks_in_one_bitmap;
+        (bitmap_end - ticks_in_one_bitmap, bitmap_end)
+    }
+}
+
+/// 检查当前tick是否超出默认bitmap范围
+fn is_overflow_default_tickarray_bitmap(tick_index: i32, tick_spacing: u16) -> bool {
+    let tick_array_start_index = get_array_start_index(tick_index, tick_spacing);
+    let max_tick_boundary = max_tick_in_tickarray_bitmap(tick_spacing);
+    
+    tick_array_start_index >= max_tick_boundary || tick_array_start_index < -max_tick_boundary
+}
+
+//计算clmm最大sol数量变化
+pub fn calculate_clmm_amount_in_range(
+    sqrt_price_current: u128,
+    sqrt_price_target: u128,
+    liquidity: u128,
+    wsol_is_token_0: bool,
+    round_up: bool,
+) -> Result<Option<u64>> {
+    if liquidity == 0 {
+        return Ok(Some(0));
+    }
+
+    let result = if wsol_is_token_0 {
+        // SOL是token A，计算token A的数量变化
+        get_delta_amount_0_unsigned(
+            sqrt_price_current,
+            sqrt_price_target,
+            liquidity,
+            round_up, // input时向上舍入，output时向下舍入
+        )
+    } else {
+        // SOL是token B，计算token B的数量变化
+        get_delta_amount_1_unsigned(
+            sqrt_price_current,
+            sqrt_price_target,
+            liquidity,
+            round_up, // input时向上舍入，output时向下舍入
+        )
+    };
+
+    match result {
+        Ok(amount) => Ok(Some(amount)),
+        Err(e) => {
+            if e == ErrorCode::MaxTokenOverflow.into() {
+                Ok(None)  
+            } else {
+                Err(e)
+            }
+        }
     }
 }

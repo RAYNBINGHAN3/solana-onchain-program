@@ -5,6 +5,7 @@ use crate::dex::dammv2::dammv2_program_id;
 use crate::dex::pump::pump_program_id;
 use crate::dex::raydium::raydium_program_id;
 use crate::dex::clmm::clmm_program_id;
+use crate::dex::whirlpool::whirlpool_program_id;
 use anchor_spl::{
     token::{Token},
     token_2022::{self as token_2022_program},
@@ -36,6 +37,7 @@ pub enum PoolType {
     PUMP,
     RAYDIUM,
     CLMM,
+    WHIRLPOOL
 }
 
 
@@ -106,6 +108,16 @@ pub enum PoolData {
         tick_array_0_index: usize,
         tick_array_1_index: usize,
     },
+    WHIRLPOOL {
+        program_id_index: usize,
+        pool_index: usize,
+        oracle_index: usize,
+        vault_a_index: usize,
+        vault_b_index: usize,
+        tick_array_0_index: usize,
+        tick_array_1_index: usize,
+        tick_array_2_index: usize,
+    },
 }
 
 /// 获取转账手续费token2022 mint
@@ -147,6 +159,8 @@ pub fn get_pool_type(pool_program_id: Pubkey) -> Result<Option<PoolType>> {
         Ok(Some(PoolType::RAYDIUM))
     } else if pool_program_id == clmm_program_id::ID {
         Ok(Some(PoolType::CLMM))
+    } else if pool_program_id == whirlpool_program_id::ID {
+        Ok(Some(PoolType::WHIRLPOOL))
     } else {
         Ok(None)
     }

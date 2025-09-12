@@ -9,7 +9,6 @@ use anchor_lang::solana_program::program::invoke;
 pub fn execute_clmm_swap<'info>(
     pool_state: &ClmmPoolState,
     token_mint_index: usize,
-    token_program_index: usize,
     mint_token_account_index: usize,
     amount: u64,
     accounts: &[AccountInfo<'info>],
@@ -51,6 +50,14 @@ pub fn execute_clmm_swap<'info>(
         )
     };
 
+    //过滤掉未初始化的tick array
+    let tick_array_indices = [
+        pool_state.tick_array_minus_1_index,
+        pool_state.tick_array_0_index,
+        pool_state.tick_array_1_index,
+    ];
+    let valid_tick_arrays = get_valid_tick_arrays(accounts, &tick_array_indices, program_id);
+
     // 构建CPI指令
     let swap_instruction = build_clmm_swap_instruction(
         program_id,
@@ -65,10 +72,11 @@ pub fn execute_clmm_swap<'info>(
         amount,
         accounts,
         ctx,
+        valid_tick_arrays.clone(),
     )?;
 
     // 执行CPI调用
-    let account_infos = vec![
+    let mut account_infos = vec![
         ctx.accounts.payer.to_account_info(),
         accounts[pool_state.amm_config_index].to_account_info(),
         accounts[pool_state.pool_index].to_account_info(),
@@ -83,10 +91,9 @@ pub fn execute_clmm_swap<'info>(
         input_mint_info,  // input__mint
         output_mint_info, // output_mint
         accounts[pool_state.bitmap_extension_index].to_account_info(), // bitmap_extension
-        accounts[pool_state.tick_array_minus_1_index].to_account_info(), // tick_array_minus_1
-        accounts[pool_state.tick_array_0_index].to_account_info(), // tick_array_0
-        accounts[pool_state.tick_array_1_index].to_account_info(), // tick_array_1
     ];
+
+    account_infos.extend(valid_tick_arrays);
 
     invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
 }
@@ -105,9 +112,11 @@ fn build_clmm_swap_instruction(
     amount: u64,
     accounts: &[AccountInfo],
     ctx: &Context<ComparePrices>,
+    valid_tick_arrays: Vec<AccountInfo>,
 ) -> Result<Instruction> {
     // swap_v2指令的discriminator
     let discriminator: [u8; 8] = [43, 4, 237, 11, 26, 201, 30, 98];
+     
 
     // 构建指令数据
     let mut instruction_data = Vec::with_capacity(41); // 8字节discriminator + 8字节amount + 8字节other_amount_threshold + 16字节sqrt_price_limit + 1字节is_base_input
@@ -157,22 +166,37 @@ fn build_clmm_swap_instruction(
         accounts[pool_state.bitmap_extension_index].key(),
         false,
     )); // bitmap_extension
-    account_metas.push(AccountMeta::new(
-        accounts[pool_state.tick_array_minus_1_index].key(),
-        false,
-    )); // tick_array_minus_1
-    account_metas.push(AccountMeta::new(
-        accounts[pool_state.tick_array_0_index].key(),
-        false,
-    )); // tick_array_0
-    account_metas.push(AccountMeta::new(
-        accounts[pool_state.tick_array_1_index].key(),
-        false,
-    )); // tick_array_1
+    
+    for tick_array in &valid_tick_arrays {
+        account_metas.push(AccountMeta::new(tick_array.key(), false));
+    }
 
     Ok(Instruction {
         program_id: program_id,
         accounts: account_metas,
         data: instruction_data,
     })
+}
+
+
+
+#[inline]
+pub fn get_valid_tick_arrays<'info>(
+    accounts: &[AccountInfo<'info>],
+    tick_array_indices: &[usize],
+    clmm_program_id: Pubkey,
+) -> Vec<AccountInfo<'info>> {
+
+    // 🚀 优化：预分配向量容量，减少内存重新分配
+    let mut valid_arrays = Vec::with_capacity(tick_array_indices.len());
+
+    for &index in tick_array_indices {
+        let account = &accounts[index];
+        
+        if *account.owner == clmm_program_id {
+            valid_arrays.push(account.to_account_info());
+        }
+    }
+
+    valid_arrays
 }

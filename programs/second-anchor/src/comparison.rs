@@ -10,6 +10,7 @@ use crate::dex::dlmm::{
 };
 use crate::dex::pump::{calculate_pump_price, parse_pump_pool_data, PumpPoolState};
 use crate::dex::raydium::{calculate_raydium_price, parse_raydium_pool_data, RaydiumPoolState};
+use crate::dex::whirlpool::{parse_whirlpool_pool_data, WhirlpoolPoolState};
 use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{bps_to_q64, q64_mul, safe_mul_div_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
@@ -42,6 +43,23 @@ pub enum ParsedPoolState {
     CLMM {
         state: ClmmPoolState,
     },
+    WHIRLPOOL {
+        state: WhirlpoolPoolState,
+    },
+}
+
+impl ParsedPoolState {
+    pub fn get_pool_type(&self) -> Option<PoolType> {
+        match self {
+            ParsedPoolState::CPMM { .. } => Some(PoolType::CPMM),
+            ParsedPoolState::DLMM { .. } => Some(PoolType::DLMM),
+            ParsedPoolState::DAMMV2 { .. } => Some(PoolType::DAMMV2),
+            ParsedPoolState::PUMP { .. } => Some(PoolType::PUMP),
+            ParsedPoolState::RAYDIUM { .. } => Some(PoolType::RAYDIUM),
+            ParsedPoolState::CLMM { .. } => Some(PoolType::CLMM),
+            ParsedPoolState::WHIRLPOOL { .. } => Some(PoolType::WHIRLPOOL),
+        }
+    }
 }
 
 /// 全局套利分析结果 (包含解析好的数据，避免重复解析)
@@ -124,6 +142,12 @@ pub fn analyze_global_arbitrage_opportunities(
                     //     PoolType::RAYDIUM,
                     //     accounts[state.pool_index].key,
                     // ),
+                    // ParsedPoolState::WHIRLPOOL { state, .. } => (
+                    //     state.price as f64 / ONE as f64,
+                    //     state.trade_fee_rate ,
+                    //     PoolType::WHIRLPOOL,
+                    //     accounts[state.pool_index].key,
+                    // ),
                     // };
                     // msg!(
                     //     " ==> Type: {:?}, Pool: {:?}, Price: {:.12} SOL, fee: {} bps",
@@ -134,7 +158,7 @@ pub fn analyze_global_arbitrage_opportunities(
                     // );
                     parsed_pools.push(Box::new(parsed_state));
                 }
-                Err(e) => {
+                Err(_) => {
                     continue;
                     // return Err(e.into()); // 其他错误，继续抛出
                 }
@@ -536,7 +560,7 @@ fn parse_pool_with_state(
                 trade_fee_rate: 0,
                 price: 0,
 
-                tick_array_bitmap: [0; 16],
+                tick_array_bitmap: Box::new([0; 16]),
             };
 
 
@@ -557,6 +581,47 @@ fn parse_pool_with_state(
             calculate_clmm_price(&mut pool_state, wsol_mint)?;
 
             let parsed_state = ParsedPoolState::CLMM { state: pool_state };
+
+            Ok(parsed_state)
+        }
+        PoolData::WHIRLPOOL {
+            program_id_index,
+            pool_index,
+            oracle_index,
+            vault_a_index,
+            vault_b_index,
+            tick_array_0_index,
+            tick_array_1_index,
+            tick_array_2_index,
+        } => {
+            let mut pool_state = WhirlpoolPoolState {
+                program_id_index: *program_id_index,
+                pool_index: *pool_index,
+                oracle_index: *oracle_index,
+                vault_a_index: *vault_a_index,
+                vault_b_index: *vault_b_index,
+                tick_array_0_index: *tick_array_0_index,
+                tick_array_1_index: *tick_array_1_index,
+                tick_array_2_index: *tick_array_2_index,
+                token_mint_a: *accounts[token_mint_index].key,
+                token_mint_b: wsol_mint,
+                sqrt_price: 0,
+                tick_current_index: 0,
+                liquidity: 0,
+                trade_fee_rate: 0,
+                price: 0,
+                tick_spacing: 0,
+            };
+
+            parse_whirlpool_pool_data(
+                pool_index,
+                wsol_mint,
+                *accounts[token_mint_index].key,
+                accounts,
+                &mut pool_state,
+            )?;
+
+            let parsed_state = ParsedPoolState::WHIRLPOOL { state: pool_state };
 
             Ok(parsed_state)
         }
@@ -601,6 +666,7 @@ fn analyze_token_arbitrage_with_states(
                 (state.price, bps_to_q64(state.trade_fee_rate))
             }
             ParsedPoolState::CLMM { state, .. } => (state.price, bps_to_q64(state.trade_fee_rate)),
+            ParsedPoolState::WHIRLPOOL { state, .. } => (state.price, bps_to_q64(state.trade_fee_rate)),
         };
         pool_data.push((price, fee_q64));
     }

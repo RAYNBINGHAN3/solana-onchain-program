@@ -223,23 +223,22 @@ pub fn calculate_dammv2_price(pool: &mut Dammv2PoolState, wsol_mint: Pubkey) -> 
     
     // msg!("pool.sqrt_price : {}" , pool.sqrt_price);
 
-    // 在Q64.64格式中，平方操作：(a * a) >> 64
-    let mut price_q64 = sqrt_price_q64
-        .checked_mul(sqrt_price_q64)
-        .unwrap()
-        .checked_shr(64)
-        .unwrap();
+    // 使用安全的平方计算：(a * a) >> 64
+    let mut price_q64 = safe_mul_div_cast(
+        sqrt_price_q64,
+        sqrt_price_q64,
+        ONE, // 除以2^64
+        Rounding::Down
+    );
 
     if price_q64 == 0 {
         return Err(ErrorCode::ZeroPrice.into());
     }   
 
-
-    // 在Q64.64格式中，倒数 = (2^64)^2 / price = 2^128 / price
+    // 如果需要取倒数（WSOL不是token_b），使用安全的除法
     if pool.token_b_mint != wsol_mint {
-        price_q64 = (ONE.checked_shl(64).unwrap())
-            .checked_div(price_q64)
-            .unwrap();
+        // 使用安全的除法来计算倒数: (2^64)^2 / price = 2^128 / price
+        price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
     }
 
     // 转换为f64用于打印 (price / 2^64)

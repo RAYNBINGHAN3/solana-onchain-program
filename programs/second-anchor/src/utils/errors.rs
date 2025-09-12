@@ -63,8 +63,8 @@ pub enum ErrorCode {
     #[msg("Invalid account data")]
     InvalidAccountData,
 
-    #[msg("Not enough tick array account")]
-    NotEnoughTickArrayAccount,
+    #[msg("No valid mint found")]
+    NoValidMintFound,
 
     #[msg("Max token overflow")]
     MaxTokenOverflow,
@@ -83,6 +83,9 @@ pub enum ErrorCode {
 
     #[msg("Invalid CLMM params")]
     InvalidClmmParams,
+
+    #[msg("Invalid tick array boundary")]
+    InvalidTickArrayBoundary,
 
     None,
 }

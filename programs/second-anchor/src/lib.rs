@@ -11,7 +11,7 @@ pub mod comparison;
 pub mod optimalamt;
 
 use utils::errors::ErrorCode;
-use constant::{CPMM_ACCOUNT_COUNT, DLMM_ACCOUNT_COUNT, DAMMV2_ACCOUNT_COUNT, PUMP_ACCOUNT_COUNT, RAYDIUM_ACCOUNT_COUNT, CLMM_ACCOUNT_COUNT};
+use constant::{CPMM_ACCOUNT_COUNT, DLMM_ACCOUNT_COUNT, DAMMV2_ACCOUNT_COUNT, PUMP_ACCOUNT_COUNT, RAYDIUM_ACCOUNT_COUNT, CLMM_ACCOUNT_COUNT, WHIRLPOOL_ACCOUNT_COUNT};
 use utils::utils::{get_pool_type, PoolData, PoolType, TokenPoolGroup};
 use comparison::analyze_global_arbitrage_opportunities;
 use optimalamt::find_optimal_wsol_amount_golden_section;
@@ -207,6 +207,23 @@ pub mod zooey_go {
                                 break;
                             }
                         },
+                        Some(PoolType::WHIRLPOOL) => {
+                            if current_index + WHIRLPOOL_ACCOUNT_COUNT <= ctx.remaining_accounts.len() {
+                                pools.push(PoolData::WHIRLPOOL {
+                                    program_id_index: current_index,
+                                    pool_index: current_index + 1,
+                                    oracle_index: current_index + 2,
+                                    vault_a_index: current_index + 3,
+                                    vault_b_index: current_index + 4,
+                                    tick_array_0_index: current_index + 5,
+                                    tick_array_1_index: current_index + 6,
+                                    tick_array_2_index: current_index + 7,
+                                });
+                                current_index += WHIRLPOOL_ACCOUNT_COUNT;
+                            } else {
+                                break;
+                            }
+                        },
                         None => {
                             // msg!("Unrecognized pool type1: {}", pool_program_id.key());
                             break;
@@ -228,10 +245,9 @@ pub mod zooey_go {
                 });
             }
         }
-
+       
         if token_groups.is_empty() {
-            msg!("No tokens found");
-            return Ok(());
+            return Err(ErrorCode::NoValidMintFound.into());
         }
 
         // 直接cpi
