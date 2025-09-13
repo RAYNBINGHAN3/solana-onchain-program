@@ -52,8 +52,6 @@ pub struct ClmmPoolState {
 
     pub trade_fee_rate: u64,
     pub price: u128,
-
-    pub tick_array_bitmap: Box<[u64; 16]>,
 }
  
 /// Bitmap Extension 数据结构 - 与Raydium SDK完全一致
@@ -259,6 +257,7 @@ pub struct ClmmParams {
     pub tick_array_states: Box<Vec<TickArrayState>>,
     pub bitmap_extension: Option<Box<TickArrayBitmapExtension>>, // 提前解析的bitmap extension
     pub sqrt_price_limit_x64: u128,
+    pub tick_array_bitmap: Box<[u64; 16]>,
 }
 
 /// 交换状态
@@ -429,7 +428,7 @@ pub fn parse_clmm_pool_data(
     );
  
     // 解析基础池数据
-    let (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1, tick_array_bitmap) = {
+    let (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1) = {
         let pool_data = pool_account.data.borrow();
   
         // 解析基础字段 (偏移量8开始，加上discriminator)
@@ -440,14 +439,7 @@ pub fn parse_clmm_pool_data(
         // 解析mint地址 (偏移量73开始)
         let token_mint_0 = Pubkey::try_from(&pool_data[73..105]).unwrap();
         let token_mint_1 = Pubkey::try_from(&pool_data[105..137]).unwrap();
-        // 解析tick_array_bitmap (偏移量904开始，16个u64 = 128字节)
-        let tick_array_bitmap: [u64; 16] = pool_data[904..1032]
-            .chunks_exact(8)
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
-            .collect::<Vec<u64>>()
-            .try_into()
-            .unwrap();
-        (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1, tick_array_bitmap)
+        (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1)
     };
 
     // 验证池子包含SOL和指定token的配对
@@ -472,9 +464,8 @@ pub fn parse_clmm_pool_data(
     };
 
     pool_state.trade_fee_rate = trade_fee_rate as u64;
-    pool_state.tick_array_bitmap = Box::new(tick_array_bitmap);
-    // pool_state.protocol_fee_rate = protocol_fee_rate;
-    // pool_state.fund_fee_rate = fund_fee_rate;
+    // tick_array_bitmap 现在在 ClmmParams 中管理
+ 
 
     // 填充池状态
     pool_state.token_mint_0 = token_mint_0;
@@ -484,11 +475,29 @@ pub fn parse_clmm_pool_data(
     pool_state.tick_current = tick_current;
     pool_state.tick_spacing = tick_spacing;
     pool_state.liquidity = liquidity;
-    // pool_state.fee_growth_global_0_x64 = fee_growth_global_0_x64;
-    // pool_state.fee_growth_global_1_x64 = fee_growth_global_1_x64;
-    // pool_state.open_time = open_time;
+ 
 
     Ok(())
+}
+
+/// 从池账户中提取 tick_array_bitmap
+pub fn extract_tick_array_bitmap(pool_account: &AccountInfo) -> Result<[u64; 16]> {
+    let pool_data = pool_account.data.borrow();
+    if pool_data.len() < 1032 {
+        return Err(ErrorCode::InvalidAccountData.into());
+    }
+    
+    // 解析tick_array_bitmap (偏移量904开始，16个u64 = 128字节)
+    let tick_array_bitmap: [u64; 16] = pool_data[904..1032]
+        .chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<u64>>()
+        .try_into()
+        .unwrap();
+
+    drop(pool_data);
+
+    Ok(tick_array_bitmap)
 }
 
 /// 计算CLMM价格
@@ -658,6 +667,7 @@ pub fn clmm_quote_exact_input_wsol(
     let (amount_0, amount_1) = clmm_swap_internal(
         pool_state,
         &params.tick_array_states,
+        &params.tick_array_bitmap,
         &params.bitmap_extension, // 使用预解析的bitmap extension
         wsol_amount_in,
         sqrt_price_limit_x64,
@@ -739,6 +749,7 @@ pub fn clmm_quote_exact_input_token(
     let (amount_0, amount_1) = clmm_swap_internal(
         pool_state,
         &params.tick_array_states,
+        &params.tick_array_bitmap,
         &params.bitmap_extension, // 使用预解析的bitmap extension
         actual_token_amount_in,
         sqrt_price_limit_x64, // sqrt_price_limit = 0 表示无价格限制
@@ -770,6 +781,7 @@ pub fn parse_tick_array_states(tick_arrays: &Vec<&AccountInfo>) -> Result<Vec<Ti
 fn clmm_swap_internal(
     pool_state: &ClmmPoolState,
     tick_array_states: &Vec<TickArrayState>,
+    tick_array_bitmap: &[u64; 16],
     bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
@@ -792,7 +804,7 @@ fn clmm_swap_internal(
  
     // 获取第一个有效的 tick array
     let (mut is_match_pool_current_tick_array, mut current_valid_tick_array_start_index) =
-        get_first_initialized_tick_array(pool_state, bitmap_extension, zero_for_one)?;
+        get_first_initialized_tick_array(pool_state, tick_array_bitmap, bitmap_extension, zero_for_one)?;
     // let mut current_valid_tick_array_start_index = first_valid_tick_array_start_index;
  
 
@@ -838,6 +850,7 @@ fn clmm_swap_internal(
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = next_initialized_tick_array_start_index(
                 pool_state,
+                tick_array_bitmap,
                 bitmap_extension,
                 current_valid_tick_array_start_index,
                 zero_for_one,
@@ -1152,6 +1165,7 @@ pub fn calculate_amount_in_range(
 /// 获取第一个初始化的 tick array - 完整实现
 fn get_first_initialized_tick_array(
     pool_state: &ClmmPoolState,
+    tick_array_bitmap: &[u64; 16],
     bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
     zero_for_one: bool,
 ) -> Result<(bool, i32)> {
@@ -1168,7 +1182,7 @@ fn get_first_initialized_tick_array(
     } else {
         // 使用默认bitmap
         check_current_tick_array_is_initialized(
-            U1024::from_limbs(*pool_state.tick_array_bitmap),
+            U1024::from_limbs(*tick_array_bitmap),
             pool_state.tick_current,
             pool_state.tick_spacing,
         )?
@@ -1181,6 +1195,7 @@ fn get_first_initialized_tick_array(
     // 如果当前tick array未初始化，查找下一个初始化的tick array
     let next_start_index = next_initialized_tick_array_start_index(
         pool_state,
+        tick_array_bitmap,
         bitmap_extension,
         current_tick_array_start_index,
         zero_for_one,
@@ -1197,6 +1212,7 @@ fn get_first_initialized_tick_array(
 /// 查找下一个初始化的 tick array 起始索引 - 完整实现
 fn next_initialized_tick_array_start_index(
     pool_state: &ClmmPoolState,
+    tick_array_bitmap: &[u64; 16],
     bitmap_extension: &Option<Box<TickArrayBitmapExtension>>, // 使用预解析的bitmap extension
     mut last_tick_array_start_index: i32,
     zero_for_one: bool,
@@ -1208,7 +1224,7 @@ fn next_initialized_tick_array_start_index(
     loop {
         // 首先在池子的默认bitmap中查找
         let (is_found, start_index) = next_initialized_tick_array_start_index_internal(
-            U1024::from_limbs(*pool_state.tick_array_bitmap),
+            U1024::from_limbs(*tick_array_bitmap),
             last_tick_array_start_index,
             pool_state.tick_spacing,
             zero_for_one,

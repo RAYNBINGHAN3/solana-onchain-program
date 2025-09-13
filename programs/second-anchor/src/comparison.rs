@@ -559,8 +559,6 @@ fn parse_pool_with_state(
                 liquidity: 0,
                 trade_fee_rate: 0,
                 price: 0,
-
-                tick_array_bitmap: Box::new([0; 16]),
             };
 
 

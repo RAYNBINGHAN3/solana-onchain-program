@@ -15,7 +15,7 @@ pub fn execute_clmm_swap<'info>(
     ctx: &Context<ComparePrices<'info>>,
     is_buy: bool, // true: WSOL->Token, false: Token->WSOL
 ) -> Result<()> {
-    // let wsol_mint = ctx.accounts.wsol_mint.key();
+    let wsol_mint = ctx.accounts.wsol_mint.key();
     // let token_mint = accounts[token_mint_index].key();
     // let program_id = accounts[token_program_index].key();
     let program_id = accounts[pool_state.program_id_index].key();
@@ -30,24 +30,47 @@ pub fn execute_clmm_swap<'info>(
         output_mint_info,
     ) = if is_buy {
         // 买入：WSOL -> Token
-        (
-            ctx.accounts.wsol_token_account.to_account_info(),
-            accounts[mint_token_account_index].to_account_info(),
-            pool_state.token_vault_0_index,
-            pool_state.token_vault_1_index,
-            ctx.accounts.wsol_mint.to_account_info(),
-            accounts[token_mint_index].to_account_info(),
-        )
+        if pool_state.token_mint_0 == wsol_mint {
+            (
+                ctx.accounts.wsol_token_account.to_account_info(),
+                accounts[mint_token_account_index].to_account_info(),
+                pool_state.token_vault_0_index,
+                pool_state.token_vault_1_index,
+                ctx.accounts.wsol_mint.to_account_info(),
+                accounts[token_mint_index].to_account_info(),
+            )
+        }else{
+            (
+                ctx.accounts.wsol_token_account.to_account_info(),
+                accounts[mint_token_account_index].to_account_info(),
+                pool_state.token_vault_1_index,
+                pool_state.token_vault_0_index,
+                ctx.accounts.wsol_mint.to_account_info(),
+                accounts[token_mint_index].to_account_info(),
+            )
+        }
+        
     } else {
         // 卖出：Token -> WSOL
-        (
-            accounts[mint_token_account_index].to_account_info(),
-            ctx.accounts.wsol_token_account.to_account_info(),
-            pool_state.token_vault_1_index,
-            pool_state.token_vault_0_index,
-            accounts[token_mint_index].to_account_info(),
-            ctx.accounts.wsol_mint.to_account_info(),
-        )
+        if pool_state.token_mint_0 == wsol_mint {
+            (
+                accounts[mint_token_account_index].to_account_info(),
+                ctx.accounts.wsol_token_account.to_account_info(),
+                pool_state.token_vault_1_index,
+                pool_state.token_vault_0_index,
+                accounts[token_mint_index].to_account_info(),
+                ctx.accounts.wsol_mint.to_account_info(),
+            )
+        }else{
+            (
+                accounts[mint_token_account_index].to_account_info(),
+                ctx.accounts.wsol_token_account.to_account_info(),
+                pool_state.token_vault_0_index,
+                pool_state.token_vault_1_index,
+                accounts[token_mint_index].to_account_info(),
+                ctx.accounts.wsol_mint.to_account_info(),
+            )
+        }
     };
 
     //过滤掉未初始化的tick array

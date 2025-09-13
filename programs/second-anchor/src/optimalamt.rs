@@ -2,7 +2,7 @@ use crate::comparison::ParsedPoolState;
 use crate::dex::clmm::{
     clmm_quote_exact_input_token, clmm_quote_exact_input_wsol,
     parse_tick_array_states, ClmmParams, TickArrayBitmapExtension,
-    calculate_clmm_amount_in_range
+    calculate_clmm_amount_in_range, extract_tick_array_bitmap
 };
 use crate::dex::cpmm::{cpmm_quote_exact_input_token, cpmm_quote_exact_input_wsol};
 use crate::dex::dammv2::{dammv2_quote_exact_input_token, dammv2_quote_exact_input_wsol};
@@ -258,6 +258,8 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
             }
         }
     }
+
+
 
     //helius sender
     require!(max_profit > min_profit as i64, ErrorCode::NoProfit);
@@ -602,10 +604,12 @@ fn get_clmm_params<'c, 'info>(
             let bitmap_extension_account = &accounts[state.bitmap_extension_index];
             // 提前解析bitmap extension
             let bitmap_extension = TickArrayBitmapExtension::parse_from_account_info(bitmap_extension_account)?;
+            let tick_array_bitmap = extract_tick_array_bitmap(&accounts[state.pool_index])?;
             Some(ClmmParams {
                 tick_array_states: Box::new(tick_array_states),
                 bitmap_extension, // 使用预解析的bitmap extension
                 sqrt_price_limit_x64,
+                tick_array_bitmap: Box::new(tick_array_bitmap),
             })
         }
         _ => None,
@@ -629,10 +633,12 @@ fn get_clmm_params<'c, 'info>(
                     safe_mul_div_cast(ONE, ONE, sqrt_price_limit_x64, Rounding::Down);
             }
 
+            let tick_array_bitmap = extract_tick_array_bitmap(&accounts[state.pool_index])?;
             Some(ClmmParams {
                 tick_array_states: Box::new(tick_array_states),
                 bitmap_extension, // 使用预解析的bitmap extension
                 sqrt_price_limit_x64,
+                tick_array_bitmap: Box::new(tick_array_bitmap),
             })
         }
         _ => None,

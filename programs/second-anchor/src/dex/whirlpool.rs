@@ -625,13 +625,14 @@ pub fn parse_whirlpool_pool_data(
     pool_state.tick_current_index = tick_current_index;
     pool_state.liquidity = liquidity;
     pool_state.trade_fee_rate = fee_rate as u64;
-    msg!("sqrt_price: {}", sqrt_price);
-    msg!("tick_current_index: {}", tick_current_index);
-    msg!("liquidity: {}", liquidity);
-    msg!("trade_fee_rate: {}", fee_rate);
-    msg!("token_mint_a: {}", token_mint_a);
-    msg!("token_mint_b: {}", token_mint_b);
-    msg!("tick_spacing: {}", tick_spacing);
+
+    // msg!("sqrt_price: {}", sqrt_price);
+    // msg!("tick_current_index: {}", tick_current_index);
+    // msg!("liquidity: {}", liquidity);
+    // msg!("trade_fee_rate: {}", fee_rate);
+    // msg!("token_mint_a: {}", token_mint_a);
+    // msg!("token_mint_b: {}", token_mint_b);
+    // msg!("tick_spacing: {}", tick_spacing);
     Ok(())
 }
 

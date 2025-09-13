@@ -184,7 +184,9 @@ fn execute_buy_swap<'info>(
             ctx,
             true,
         ),
-        ParsedPoolState::CLMM { state, .. } => execute_clmm_swap(
+        ParsedPoolState::CLMM { state, .. } => {
+      
+            execute_clmm_swap(
             state,
             analysis.best_token_mint_index.unwrap(),
             analysis.mint_token_account_index.unwrap(),
@@ -192,7 +194,8 @@ fn execute_buy_swap<'info>(
             accounts,
             ctx,
             true,
-        ),
+        )
+    },
         ParsedPoolState::WHIRLPOOL { state } => execute_whirlpool_swap(
             state,
             analysis.token_program_index.unwrap(),  
