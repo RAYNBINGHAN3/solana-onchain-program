@@ -266,7 +266,7 @@ pub mod zooey_go {
             &ctx.remaining_accounts,
             false,
         ) {
-            Ok(analysis) => {
+            Ok(mut analysis) => {
                 drop(token_groups);
                 if analysis.max_profit_ratio <= 0 {
                     msg!("No opportunities");
@@ -299,7 +299,7 @@ pub mod zooey_go {
 
                         let initial_wsol_balance = ctx.accounts.wsol_token_account.amount;
                         match swap::swap::execute_arbitrage_swaps(
-                            &analysis,
+                            &mut analysis,
                             &optimization_result,
                             &ctx.remaining_accounts,
                             &ctx,
@@ -393,7 +393,7 @@ fn to_dir_swap<'a, 'b, 'c, 'info>(
         &ctx.remaining_accounts,
         true,
     ) {
-        Ok(analysis) => {
+        Ok(mut analysis) => {
             require!(analysis.buy_pool_state.is_some() && analysis.sell_pool_state.is_some(), ErrorCode::NoProfit);
                     // 创建优化结果（直接使用用户指定的金额）
             let mut optimization_result = optimalamt::OptimizationResult {
@@ -427,7 +427,7 @@ fn to_dir_swap<'a, 'b, 'c, 'info>(
             
             // 使用现有的套利交换逻辑
             match swap::swap::execute_arbitrage_swaps(
-                &analysis,
+                &mut analysis,
                 &optimization_result,
                 &ctx.remaining_accounts,
                 ctx,

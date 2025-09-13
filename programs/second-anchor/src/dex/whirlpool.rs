@@ -658,9 +658,8 @@ fn parse_whirlpool_tick_array(tick_array_info: &AccountInfo) -> Result<Option<Wh
     let start_tick_index = i32::from_le_bytes(data[8..12].try_into().unwrap());
     
     // ticks: [Tick; 88] (offset: 12, 每个 Tick 113 字节)
-    // 使用 Box 在堆上分配大数组，避免栈溢出
-    // let mut ticks = Box::new([WhirlpoolTick::default(); TICK_ARRAY_SIZE as usize]);
-    let mut ticks = Box::new(Vec::with_capacity(TICK_ARRAY_SIZE as usize));
+    // 🚀 优化：预分配精确容量的Vec，避免多次push扩容
+    let mut ticks = Vec::with_capacity(TICK_ARRAY_SIZE as usize);
 
     for i in 0..(TICK_ARRAY_SIZE as usize) {
         let offset = 12 + i * TICK_SIZE; // 每个 Tick 113 字节
@@ -679,13 +678,12 @@ fn parse_whirlpool_tick_array(tick_array_info: &AccountInfo) -> Result<Option<Wh
         // liquidity_gross: 16 bytes (offset: 17)
         let liquidity_gross = u128::from_le_bytes(data[offset + 17..offset + 33].try_into().unwrap());
         
-      
         ticks.push(WhirlpoolTick::new(initialized, liquidity_net, liquidity_gross));
     }
   
     Ok(Some(WhirlpoolTickArray {
         start_tick_index,
-        ticks: ticks,  
+        ticks: Box::new(ticks),  
     }))
 }
 

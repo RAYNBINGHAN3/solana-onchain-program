@@ -134,7 +134,7 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
     )?;
 
     let mut left = 0;
-    let mut right = min(max_effective_input_buy_wsol, max_effective_input_sell_wsol);
+    let mut right = min(max_effective_input_buy_wsol, max_effective_input_sell_wsol) / 3; //狙击时候为了快速计算，onchain /2就够了或者不用/
 
     msg!(
         "D {} J {}",
@@ -217,7 +217,7 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
 
     // 二分法精确搜索
     let mut iterations = 0u8;
-    while right - left > precision && iterations < 4 {
+    while right - left > precision && iterations < 5 {
         let mid = if iterations == 0 {
             (left + right) / first_denom
         } else {

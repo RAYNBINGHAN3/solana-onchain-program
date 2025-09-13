@@ -95,27 +95,30 @@ pub fn execute_clmm_swap<'info>(
         amount,
         accounts,
         ctx,
-        valid_tick_arrays.clone(),
+        &valid_tick_arrays,
     )?;
+    
+    
+    // 🚀 优化：预分配精确容量，避免扩容 (14个固定账户 + 最多3个tick_arrays)
+    let mut account_infos = Vec::with_capacity(14 + valid_tick_arrays.len());
+    
+    // 按顺序添加固定账户
+    account_infos.push(ctx.accounts.payer.to_account_info());
+    account_infos.push(accounts[pool_state.amm_config_index].to_account_info());
+    account_infos.push(accounts[pool_state.pool_index].to_account_info());
+    account_infos.push(input_token_account);
+    account_infos.push(output_token_account);
+    account_infos.push(accounts[input_vault_index].to_account_info());
+    account_infos.push(accounts[output_vault_index].to_account_info());
+    account_infos.push(accounts[pool_state.observation_key_index].to_account_info());
+    account_infos.push(ctx.accounts.token_program.to_account_info());
+    account_infos.push(ctx.accounts.token_program_2022.to_account_info());
+    account_infos.push(ctx.accounts.memo_program.to_account_info());
+    account_infos.push(input_mint_info);
+    account_infos.push(output_mint_info);
+    account_infos.push(accounts[pool_state.bitmap_extension_index].to_account_info());
 
-    // 执行CPI调用
-    let mut account_infos = vec![
-        ctx.accounts.payer.to_account_info(),
-        accounts[pool_state.amm_config_index].to_account_info(),
-        accounts[pool_state.pool_index].to_account_info(),
-        input_token_account,
-        output_token_account,
-        accounts[input_vault_index].to_account_info(),
-        accounts[output_vault_index].to_account_info(),
-        accounts[pool_state.observation_key_index].to_account_info(),
-        ctx.accounts.token_program.to_account_info(),
-        ctx.accounts.token_program_2022.to_account_info(), // token_program_2022 (same as token_program)
-        ctx.accounts.memo_program.to_account_info(),
-        input_mint_info,  // input__mint
-        output_mint_info, // output_mint
-        accounts[pool_state.bitmap_extension_index].to_account_info(), // bitmap_extension
-    ];
-
+    // 添加有效的tick arrays
     account_infos.extend(valid_tick_arrays);
 
     invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
@@ -135,7 +138,7 @@ fn build_clmm_swap_instruction(
     amount: u64,
     accounts: &[AccountInfo],
     ctx: &Context<ComparePrices>,
-    valid_tick_arrays: Vec<AccountInfo>,
+    valid_tick_arrays: &[AccountInfo],
 ) -> Result<Instruction> {
     // swap_v2指令的discriminator
     let discriminator: [u8; 8] = [43, 4, 237, 11, 26, 201, 30, 98];
@@ -149,8 +152,8 @@ fn build_clmm_swap_instruction(
     instruction_data.extend_from_slice(&0u128.to_le_bytes()); // sqrt_price_limit (0 = no limit)
     instruction_data.push(1); // is_base_input = true
 
-    // 构建账户列表
-    let mut account_metas = Vec::with_capacity(17);
+    // 🚀 优化：精确预分配容量 (14个固定账户 + 最多3个tick_arrays)
+    let mut account_metas = Vec::with_capacity(14 + valid_tick_arrays.len());
 
     // 按照IDL顺序添加账户
     account_metas.push(AccountMeta::new(*payer, true)); // payer
@@ -184,13 +187,14 @@ fn build_clmm_swap_instruction(
     )); // memo_program
     account_metas.push(AccountMeta::new_readonly(input_mint, false)); // input_vault_mint
     account_metas.push(AccountMeta::new_readonly(output_mint, false)); // output_vault_mint
-                                                                       // tick array + tick array bitmap extension
+    // tick array + tick array bitmap extension
     account_metas.push(AccountMeta::new(
         accounts[pool_state.bitmap_extension_index].key(),
         false,
     )); // bitmap_extension
     
-    for tick_array in &valid_tick_arrays {
+    // 🚀 优化：批量添加tick arrays，避免多次push
+    for tick_array in valid_tick_arrays {
         account_metas.push(AccountMeta::new(tick_array.key(), false));
     }
 

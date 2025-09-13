@@ -134,12 +134,12 @@ pub fn execute_dlmm_swap<'info>(
     // 构建指令
     let swap_instruction = Instruction {
         program_id: accounts[pool_state.program_id_index].key(),
-        accounts: account_metas.clone(),
+        accounts: account_metas,
         data: instruction_data,
     };
 
     // 🚀 优化：构建账户信息数组
-    let mut account_infos = Vec::with_capacity(account_metas.len());
+    let mut account_infos = Vec::with_capacity(17);
     account_infos.push(accounts[pool_state.pool_index].to_account_info()); // lb_pair
                                                                            // 跳过 bin_array_bitmap_extension (可选账户)
     account_infos.push(accounts[reserve_x_index].to_account_info()); // reserve_x

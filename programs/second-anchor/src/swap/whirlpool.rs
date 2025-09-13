@@ -99,24 +99,23 @@ pub fn execute_whirlpool_swap<'info>(
         ctx
     )?;
 
-    // 构建账户信息数组
-    let account_infos = vec![
-        token_program_a,       // tokenProgramA
-        token_program_b,  // tokenProgramB
-        ctx.accounts.memo_program.to_account_info(),        // memoProgram
-        ctx.accounts.payer.to_account_info(),               // tokenAuthority
-        accounts[pool_state.pool_index].to_account_info(),  // whirlpool
-        mint_a,                                    // tokenMintA
-        mint_b,                                   // tokenMintB
-        token_account_a,                                // tokenOwnerAccountA
-        accounts[pool_state.vault_a_index].to_account_info(),      // tokenVaultA
-        token_account_b,                               // tokenOwnerAccountB
-        accounts[pool_state.vault_b_index].to_account_info(),     // tokenVaultB
-        accounts[pool_state.tick_array_0_index].to_account_info(), // tickArray0
-        accounts[pool_state.tick_array_1_index].to_account_info(), // tickArray1
-        accounts[pool_state.tick_array_2_index].to_account_info(), // tickArray2
-        accounts[pool_state.oracle_index].to_account_info(), // oracle
-    ];
+    // 🚀 优化：预分配精确容量，避免扩容 (15个固定账户)
+    let mut account_infos = Vec::with_capacity(15);
+    account_infos.push(token_program_a);       // tokenProgramA
+    account_infos.push(token_program_b);  // tokenProgramB
+    account_infos.push(ctx.accounts.memo_program.to_account_info());        // memoProgram
+    account_infos.push(ctx.accounts.payer.to_account_info());               // tokenAuthority
+    account_infos.push(accounts[pool_state.pool_index].to_account_info());  // whirlpool
+    account_infos.push(mint_a);                                    // tokenMintA
+    account_infos.push(mint_b);                                   // tokenMintB
+    account_infos.push(token_account_a);                                // tokenOwnerAccountA
+    account_infos.push(accounts[pool_state.vault_a_index].to_account_info());      // tokenVaultA
+    account_infos.push(token_account_b);                               // tokenOwnerAccountB
+    account_infos.push(accounts[pool_state.vault_b_index].to_account_info());     // tokenVaultB
+    account_infos.push(accounts[pool_state.tick_array_0_index].to_account_info()); // tickArray0
+    account_infos.push(accounts[pool_state.tick_array_1_index].to_account_info()); // tickArray1
+    account_infos.push(accounts[pool_state.tick_array_2_index].to_account_info()); // tickArray2
+    account_infos.push(accounts[pool_state.oracle_index].to_account_info()); // oracle
 
     // 执行 CPI 调用
     invoke(&swap_instruction, &account_infos).map_err(|e| e.into())

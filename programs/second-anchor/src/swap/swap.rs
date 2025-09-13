@@ -20,7 +20,7 @@ pub struct SwapResult {
 
 /// 执行套利交易的主要函数
 pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
-    analysis: &GlobalArbitrageAnalysis,
+    analysis: &mut GlobalArbitrageAnalysis,
     optimization_result: &OptimizationResult,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<'a, 'b, 'c, 'info, ComparePrices<'info>>,
@@ -39,6 +39,9 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
         wsol_mint_key,
     )?;
 
+    // 🚀 内存优化：买入完成后释放buy_pool_state内存，减少堆内存使用
+    analysis.buy_pool_state = None;
+
     // //如果买入是pump 校验token余额
     // let mut token_in = optimization_result.max_mint_amount_out;
     // match analysis.buy_pool_state.as_ref().unwrap() {
@@ -53,7 +56,9 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
     //     }
     //     _ => {}
     // }
+    
 
+    
 
     //获取当前token余额 - 支持Token和Token2022
     let payer_token_account = &accounts[analysis.mint_token_account_index.unwrap()];
@@ -87,6 +92,9 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
         wsol_mint_key,
     )?;
 
+    // 🚀 内存优化：卖出完成后释放sell_pool_state内存，进一步减少堆内存使用
+    analysis.sell_pool_state = None;
+
     //检验wsol余额手动获取实时余额
     let wsol_account_info = ctx.accounts.wsol_token_account.to_account_info();
     let after_wsol_balance = {
@@ -110,7 +118,7 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
 
 /// 执行买入交易
 fn execute_buy_swap<'info>(
-    analysis: &GlobalArbitrageAnalysis,
+    analysis: &mut GlobalArbitrageAnalysis,
     wsol_amount: u64,
     max_or_min_amount_out: u64,
     accounts: &[AccountInfo<'info>],

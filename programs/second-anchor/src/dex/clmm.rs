@@ -765,8 +765,8 @@ pub fn clmm_quote_exact_input_token(
 
 pub fn parse_tick_array_states(tick_arrays: &Vec<&AccountInfo>) -> Result<Vec<TickArrayState>> {
   
-    // 创建 tick array 队列 - 全部解析
-    let mut tick_array_states: Vec<TickArrayState> = Vec::new();
+    // 🚀 优化：预分配容量，避免动态扩容
+    let mut tick_array_states: Vec<TickArrayState> = Vec::with_capacity(tick_arrays.len());
     for tick_array_info in tick_arrays {
         if let Some(tick_array_state) = parse_tick_array_state(tick_array_info)? {
             tick_array_states.push(tick_array_state);
