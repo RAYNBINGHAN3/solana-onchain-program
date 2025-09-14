@@ -78,7 +78,14 @@ pub fn execute_whirlpool_swap<'info>(
         }
     };
 
-  
+    // //过滤掉未初始化的tick array
+    // let tick_array_indices = [
+    //     pool_state.tick_array_0_index,
+    //     pool_state.tick_array_1_index,
+    //     pool_state.tick_array_2_index,
+    // ];
+
+    // let valid_tick_arrays = get_valid_tick_arrays(accounts, &tick_array_indices, program_id);
    
     // 构建 CPI 指令
     let swap_instruction = build_whirlpool_swap_instruction(
@@ -218,3 +225,23 @@ fn build_whirlpool_swap_instruction(
 }
 
  
+// #[inline]
+// pub fn get_valid_tick_arrays<'info>(
+//     accounts: &[AccountInfo<'info>],
+//     tick_array_indices: &[usize],
+//     whirlpool_program_id: Pubkey,
+// ) -> Vec<AccountInfo<'info>> {
+
+//     // 🚀 优化：预分配向量容量，减少内存重新分配
+//     let mut valid_arrays = Vec::with_capacity(tick_array_indices.len());
+
+//     for &index in tick_array_indices {
+//         let account = &accounts[index];
+        
+//         if *account.owner == whirlpool_program_id {
+//             valid_arrays.push(account.to_account_info());
+//         }
+//     }
+
+//     valid_arrays
+// }

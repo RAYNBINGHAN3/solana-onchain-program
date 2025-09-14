@@ -11,7 +11,7 @@ pub mod dlmm_program_id {
 
 /// Bin Array相关常量
 pub const MAX_BIN_PER_ARRAY: usize = 70;
-pub const BIN_ARRAY_BITMAP_SIZE: i32 = 512;
+// pub const BIN_ARRAY_BITMAP_SIZE: i32 = 512;
 
 /// DLMM池状态数据结构 (包含费率计算所需的所有字段)
 #[derive(Debug, Clone)]
@@ -69,43 +69,43 @@ pub struct BinState {
 }
 
 /// Bin Array状态（简化版本）
-#[derive(Debug, Clone)]
-pub struct BinArrayState {
-    pub index: i32,
-    pub bins: Vec<BinState>, // 最多70个bin
-}
+// #[derive(Debug, Clone)]
+// pub struct BinArrayState {
+//     pub index: i32,
+//     pub bins: Vec<BinState>, // 最多70个bin
+// }
 
-impl BinArrayState {
-    /// 检查bin_id是否在当前array范围内
-    pub fn is_bin_id_within_range(&self, bin_id: i32) -> bool {
-        let lower_bin_id = self.index * MAX_BIN_PER_ARRAY as i32;
-        let upper_bin_id = lower_bin_id + MAX_BIN_PER_ARRAY as i32 - 1;
-        bin_id >= lower_bin_id && bin_id <= upper_bin_id
-    }
+// impl BinArrayState {
+//     /// 检查bin_id是否在当前array范围内
+//     pub fn is_bin_id_within_range(&self, bin_id: i32) -> bool {
+//         let lower_bin_id = self.index * MAX_BIN_PER_ARRAY as i32;
+//         let upper_bin_id = lower_bin_id + MAX_BIN_PER_ARRAY as i32 - 1;
+//         bin_id >= lower_bin_id && bin_id <= upper_bin_id
+//     }
 
-    /// 获取bin在array中的索引
-    pub fn get_bin_index_in_array(&self, bin_id: i32) -> Option<usize> {
-        if !self.is_bin_id_within_range(bin_id) {
-            return None;
-        }
-        let lower_bin_id = self.index * MAX_BIN_PER_ARRAY as i32;
-        Some((bin_id - lower_bin_id) as usize)
-    }
+//     /// 获取bin在array中的索引
+//     pub fn get_bin_index_in_array(&self, bin_id: i32) -> Option<usize> {
+//         if !self.is_bin_id_within_range(bin_id) {
+//             return None;
+//         }
+//         let lower_bin_id = self.index * MAX_BIN_PER_ARRAY as i32;
+//         Some((bin_id - lower_bin_id) as usize)
+//     }
 
-    /// 获取bin状态
-    pub fn get_bin(&self, bin_id: i32) -> Option<&BinState> {
-        let index = self.get_bin_index_in_array(bin_id)?;
-        self.bins.get(index)
-    }
-}
+//     /// 获取bin状态
+//     pub fn get_bin(&self, bin_id: i32) -> Option<&BinState> {
+//         let index = self.get_bin_index_in_array(bin_id)?;
+//         self.bins.get(index)
+//     }
+// }
 
-/// 交换结果
-#[derive(Debug)]
-pub struct SwapResult {
-    pub amount_in_with_fees: u64,
-    pub amount_out: u64,
-    pub fee: u64,
-}
+// /// 交换结果
+// #[derive(Debug)]
+// pub struct SwapResult {
+//     pub amount_in_with_fees: u64,
+//     pub amount_out: u64,
+//     pub fee: u64,
+// }
 
 /// 解析DLMM池数据 (完整解析所有费率计算必需字段)
 pub fn parse_dlmm_pool_data(

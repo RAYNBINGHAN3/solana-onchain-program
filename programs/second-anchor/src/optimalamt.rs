@@ -1,8 +1,7 @@
 use crate::comparison::ParsedPoolState;
 use crate::dex::clmm::{
-    clmm_quote_exact_input_token, clmm_quote_exact_input_wsol,
-    parse_tick_array_states, ClmmParams, TickArrayBitmapExtension,
-    calculate_clmm_amount_in_range, extract_tick_array_bitmap
+    calculate_clmm_amount_in_range, clmm_quote_exact_input_token, clmm_quote_exact_input_wsol,
+    extract_tick_array_bitmap, parse_tick_array_states, ClmmParams, TickArrayBitmapExtension,
 };
 use crate::dex::cpmm::{cpmm_quote_exact_input_token, cpmm_quote_exact_input_wsol};
 use crate::dex::dammv2::{dammv2_quote_exact_input_token, dammv2_quote_exact_input_wsol};
@@ -13,12 +12,12 @@ use crate::dex::dlmm::{
 use crate::dex::pump::{pump_quote_exact_input_token, pump_quote_exact_input_wsol};
 use crate::dex::raydium::{raydium_quote_exact_input_token, raydium_quote_exact_input_wsol};
 use crate::dex::whirlpool::{
-    whirlpool_quote_exact_input_token, 
-    whirlpool_quote_exact_input_wsol, 
-    WhirlpoolParams, parse_whirlpool_tick_arrays, 
-    parse_whirlpool_oracle_adaptive_fee, 
-    calculate_whirlpool_amount_in_range};
+    calculate_whirlpool_amount_in_range, parse_whirlpool_oracle_adaptive_fee,
+    parse_whirlpool_tick_arrays_three, whirlpool_quote_exact_input_token,
+    whirlpool_quote_exact_input_wsol, WhirlpoolParams,
+};
 use crate::utils::errors::ErrorCode;
+use crate::utils::utils::PoolType;
 use crate::utils::u128x128_math::{integer_sqrt_u128, safe_mul_div_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
 use anchor_lang::prelude::*;
@@ -35,12 +34,12 @@ pub struct OptimizationResult {
 
 /// 优化的黄金分割法寻找最优买入SOL数量
 /// 基于套利利润函数单峰性质的智能优化算法
-pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
+pub fn find_optimal_wsol_amount_golden_section<'info>(
     buy_pool_state: &ParsedPoolState,
     sell_pool_state: &ParsedPoolState,
     wsol_mint: Pubkey,
     max_wsol_balance: u64,
-    accounts: &'c [AccountInfo<'info>],
+    accounts: &'info [AccountInfo<'info>],
     max_profit_ratio: u128,
     min_profit: u32,
     token_mint_info: &AccountInfo,
@@ -50,11 +49,11 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
 
     // 首先提取池子价格用于后续计算
     let (is_whirlpool_buy, is_clmm_buy, is_dlmm_buy, buy_pool_price) = match buy_pool_state {
-        ParsedPoolState::DLMM { state, .. } => (false,false, true, state.price),
+        ParsedPoolState::DLMM { state, .. } => (false, false, true, state.price),
         ParsedPoolState::CLMM { state, .. } => (false, true, false, state.price),
         ParsedPoolState::WHIRLPOOL { state, .. } => (true, false, false, state.price),
 
-        ParsedPoolState::CPMM { state } => (false,false, false, state.price),
+        ParsedPoolState::CPMM { state } => (false, false, false, state.price),
         ParsedPoolState::DAMMV2 { state, .. } => (false, false, false, state.price),
         ParsedPoolState::PUMP { state, .. } => (false, false, false, state.price),
         ParsedPoolState::RAYDIUM { state, .. } => (false, false, false, state.price),
@@ -70,7 +69,6 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
         ParsedPoolState::PUMP { state, .. } => (false, false, false, state.price),
         ParsedPoolState::RAYDIUM { state, .. } => (false, false, false, state.price),
     };
- 
 
     let is_clmm_involved = is_clmm_buy || is_clmm_sell;
     let is_dlmm_involved = is_dlmm_buy || is_dlmm_sell;
@@ -102,6 +100,7 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
         (None, None)
     };
 
+    
     let (buy_whirlpool_params, sell_whirlpool_params) = if is_whirlpool_involved {
         get_whirlpool_params(
             accounts,
@@ -141,7 +140,11 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
         max_effective_input_buy_wsol as f64 / 1_000_000_000.0,
         max_effective_input_sell_wsol as f64 / 1_000_000_000.0
     );
-    msg!("Buy: {:?}, Sell: {:?}", buy_pool_state.get_pool_type(), sell_pool_state.get_pool_type());
+    msg!(
+        "Buy: {:?}, Sell: {:?}",
+        buy_pool_state.get_pool_type(),
+        sell_pool_state.get_pool_type()
+    );
 
     // 足够小的测试点
     let test_point = min(100_000, right);
@@ -159,12 +162,13 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
         token_mint_info,
     )?;
 
+    //测试dex用
     // msg!("profit: {}, token_amount_out: {}", profit, token_amount_out);
     // return Ok(OptimizationResult {
     //     optimal_wsol_amount: test_point,
-    //     max_profit: 1234,
+    //     max_profit: 1234 as u64,
     //     max_mint_amount_out: token_amount_out,
-    //     total_wsol_out: test_point + 1234 as u64,
+    //     total_wsol_out: test_point + min_profit as u64,
     // });
 
     require!(profit > 0, ErrorCode::NoProfit);
@@ -259,12 +263,32 @@ pub fn find_optimal_wsol_amount_golden_section<'c, 'info>(
         }
     }
 
-
-
     //helius sender
     require!(max_profit > min_profit as i64, ErrorCode::NoProfit);
 
-    best_amount = min(best_amount, max_wsol_balance); //这里不知道max_wsol_balance输出的profit 有bug
+    // best_amount = min(best_amount, max_wsol_balance); //这里不知道max_wsol_balance输出的profit 有bug
+    if best_amount > max_wsol_balance {
+        best_amount = max_wsol_balance;
+        if buy_pool_state.get_pool_type() == Some(PoolType::PUMP) {
+            msg!("re calculate pump");
+            //重新计算best_amount的输出 max_mint_amount_out
+            (max_profit, max_mint_amount_out) = calculate_arbitrage_profit_optimized(
+                buy_pool_state,
+                sell_pool_state,
+                wsol_mint,
+                best_amount * 99 / 100,
+                &buy_ordered_bins,
+                &sell_ordered_bins,
+                &buy_clmm_params,
+                &sell_clmm_params,
+                &buy_whirlpool_params,
+                &sell_whirlpool_params,
+                token_mint_info,
+            )?;
+
+            require!(max_profit > min_profit as i64, ErrorCode::NoProfit);
+        }
+    }
 
     Ok(OptimizationResult {
         optimal_wsol_amount: best_amount,
@@ -363,8 +387,8 @@ fn calculate_arbitrage_profit_optimized(
     sell_ordered_bins: &Option<Vec<(i32, crate::dex::dlmm::BinState)>>,
     buy_clmm_params: &Option<ClmmParams>,
     sell_clmm_params: &Option<ClmmParams>,
-    buy_whirlpool_params: &Option<WhirlpoolParams>,
-    sell_whirlpool_params: &Option<WhirlpoolParams>,
+    buy_whirlpool_params: &Option<WhirlpoolParams<'_>>,
+    sell_whirlpool_params: &Option<WhirlpoolParams<'_>>,
     token_mint_info: &AccountInfo,
 ) -> Result<(i64, u64)> {
     if wsol_amount_in == 0 {
@@ -410,7 +434,7 @@ fn quote_buy_token_with_wsol_optimized(
     wsol_amount_in: u64,
     ordered_bins: &Option<Vec<(i32, crate::dex::dlmm::BinState)>>,
     buy_clmm_params: &Option<ClmmParams>,
-    buy_whirlpool_params: &Option<WhirlpoolParams>,
+    buy_whirlpool_params: &Option<WhirlpoolParams<'_>>,
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     match pool_state {
@@ -474,7 +498,7 @@ fn quote_buy_token_with_wsol_optimized(
                 buy_clmm_params,
             )?;
             Ok(token_amount_out)
-        },
+        }
         ParsedPoolState::WHIRLPOOL { state, .. } => {
             let token_amount_out = whirlpool_quote_exact_input_wsol(
                 state,
@@ -495,7 +519,7 @@ fn quote_sell_token_for_wsol_optimized(
     token_amount_in: u64,
     ordered_bins: &Option<Vec<(i32, crate::dex::dlmm::BinState)>>,
     sell_clmm_params: &Option<ClmmParams>,
-    sell_whirlpool_params: &Option<WhirlpoolParams>,
+    sell_whirlpool_params: &Option<WhirlpoolParams<'_>>,
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     match pool_state {
@@ -603,7 +627,8 @@ fn get_clmm_params<'c, 'info>(
             let tick_array_states = parse_tick_array_states(&tick_arrays)?;
             let bitmap_extension_account = &accounts[state.bitmap_extension_index];
             // 提前解析bitmap extension
-            let bitmap_extension = TickArrayBitmapExtension::parse_from_account_info(bitmap_extension_account)?;
+            let bitmap_extension =
+                TickArrayBitmapExtension::parse_from_account_info(bitmap_extension_account)?;
             let tick_array_bitmap = extract_tick_array_bitmap(&accounts[state.pool_index])?;
             Some(ClmmParams {
                 tick_array_states: Box::new(tick_array_states),
@@ -624,7 +649,8 @@ fn get_clmm_params<'c, 'info>(
             let tick_array_states = parse_tick_array_states(&tick_arrays)?;
             let bitmap_extension_account = &accounts[state.bitmap_extension_index];
             // 提前解析bitmap extension
-            let bitmap_extension = TickArrayBitmapExtension::parse_from_account_info(bitmap_extension_account)?;
+            let bitmap_extension =
+                TickArrayBitmapExtension::parse_from_account_info(bitmap_extension_account)?;
             let mut sqrt_price_limit_x64 = integer_sqrt_u128(buy_pool_price) << 32; // Q64.64格式的开平方
 
             // 确保sqrt价格格式一致
@@ -647,17 +673,19 @@ fn get_clmm_params<'c, 'info>(
     Ok((buy_clmm_params, sell_clmm_params))
 }
 
-
 /// 获取Whirlpool参数
-fn get_whirlpool_params<'c, 'info>(
-    accounts: &'c [AccountInfo<'info>],
+fn get_whirlpool_params<'info>(
+    accounts: &'info [AccountInfo<'info>],
     buy_pool_state: &ParsedPoolState,
     sell_pool_state: &ParsedPoolState,
     buy_pool_price: u128,
     sell_pool_price: u128,
     wsol_mint: Pubkey,
-) -> Result<(Option<WhirlpoolParams>, Option<WhirlpoolParams>)> {
-    let buy_whirlpool_params: Option<WhirlpoolParams> = match buy_pool_state {
+) -> Result<(
+    Option<WhirlpoolParams<'info>>,
+    Option<WhirlpoolParams<'info>>,
+)> {
+    let buy_whirlpool_params: Option<WhirlpoolParams<'info>> = match buy_pool_state {
         ParsedPoolState::WHIRLPOOL { state } => {
             let mut sqrt_price_limit_x64 = integer_sqrt_u128(sell_pool_price) << 32; // Q64.64格式的开平方
 
@@ -667,31 +695,29 @@ fn get_whirlpool_params<'c, 'info>(
                     safe_mul_div_cast(ONE, ONE, sqrt_price_limit_x64, Rounding::Up);
             }
 
-            let tick_arrays = vec![
+            let tick_array_states = parse_whirlpool_tick_arrays_three(
                 &accounts[state.tick_array_0_index],
                 &accounts[state.tick_array_1_index],
                 &accounts[state.tick_array_2_index],
-            ];
-            let tick_array_states = parse_whirlpool_tick_arrays(&tick_arrays)?;
+            )?;
             let oracle_info = parse_whirlpool_oracle_adaptive_fee(&accounts[state.oracle_index])?;
             Some(WhirlpoolParams {
-                tick_arrays: Box::new(tick_array_states),
-                sqrt_price_limit:sqrt_price_limit_x64,
-                oracle_info:Box::new(oracle_info),
+                tick_arrays: tick_array_states,
+                sqrt_price_limit: sqrt_price_limit_x64,
+                oracle_info: Box::new(oracle_info),
             })
         }
         _ => None,
     };
-    let sell_whirlpool_params: Option<WhirlpoolParams> = match sell_pool_state {
+    let sell_whirlpool_params: Option<WhirlpoolParams<'info>> = match sell_pool_state {
         ParsedPoolState::WHIRLPOOL { state } => {
-            let tick_arrays = vec![
+            let tick_array_states = parse_whirlpool_tick_arrays_three(
                 &accounts[state.tick_array_0_index],
                 &accounts[state.tick_array_1_index],
                 &accounts[state.tick_array_2_index],
-            ];
-            let tick_array_states = parse_whirlpool_tick_arrays(&tick_arrays)?;
+            )?;
             let mut sqrt_price_limit_x64 = integer_sqrt_u128(buy_pool_price) << 32; // Q64.64格式的开平方
-          
+
             if state.token_mint_b != wsol_mint {
                 sqrt_price_limit_x64 =
                     safe_mul_div_cast(ONE, ONE, sqrt_price_limit_x64, Rounding::Down);
@@ -699,9 +725,9 @@ fn get_whirlpool_params<'c, 'info>(
 
             let oracle_info = parse_whirlpool_oracle_adaptive_fee(&accounts[state.oracle_index])?;
             Some(WhirlpoolParams {
-                tick_arrays: Box::new(tick_array_states),
-                sqrt_price_limit:sqrt_price_limit_x64,
-                oracle_info:Box::new(oracle_info),
+                tick_arrays: tick_array_states,
+                sqrt_price_limit: sqrt_price_limit_x64,
+                oracle_info: Box::new(oracle_info),
             })
         }
         _ => None,
@@ -710,15 +736,12 @@ fn get_whirlpool_params<'c, 'info>(
     Ok((buy_whirlpool_params, sell_whirlpool_params))
 }
 
-
-
-
-fn get_max_effective_input_wsol_from_buy<'c, 'info>(
+fn get_max_effective_input_wsol_from_buy<'info>(
     buy_pool_state: &ParsedPoolState,
     wsol_mint: Pubkey,
     max_profit_ratio: u128,
     buy_ordered_bins: &Option<Vec<(i32, crate::dex::dlmm::BinState)>>,
-    accounts: &'c [AccountInfo<'info>],
+    accounts: &'info [AccountInfo<'info>],
     sell_pool_price: u128,
 ) -> Result<u64> {
     let max_effective_input_buy = match buy_pool_state {
@@ -830,12 +853,12 @@ fn get_max_effective_input_wsol_from_buy<'c, 'info>(
     Ok(max_effective_input_buy)
 }
 
-fn get_max_effective_input_wsol_form_sell<'c, 'info>(
+fn get_max_effective_input_wsol_form_sell<'info>(
     sell_pool_state: &ParsedPoolState,
     wsol_mint: Pubkey,
     max_profit_ratio: u128,
     sell_ordered_bins: &Option<Vec<(i32, crate::dex::dlmm::BinState)>>,
-    accounts: &'c [AccountInfo<'info>],
+    accounts: &'info [AccountInfo<'info>],
     buy_pool_price: u128,
 ) -> Result<u64> {
     let max_effective_input_sell = match sell_pool_state {

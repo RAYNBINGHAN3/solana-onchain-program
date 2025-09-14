@@ -59,12 +59,9 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
     
 
     
-
-    //获取当前token余额 - 支持Token和Token2022
-    let payer_token_account = &accounts[analysis.mint_token_account_index.unwrap()];
-
     // 直接读取token账户数据的amount字段 (位置相同，兼容Token和Token2022)
     let token_balance = {
+        let payer_token_account = &accounts[analysis.mint_token_account_index.unwrap()];
         let account_data = payer_token_account.data.borrow();       
         // Token账户结构: mint(32) + owner(32) + amount(8) + ...
         u64::from_le_bytes(
@@ -96,8 +93,8 @@ pub fn execute_arbitrage_swaps<'a, 'b, 'c, 'info>(
     analysis.sell_pool_state = None;
 
     //检验wsol余额手动获取实时余额
-    let wsol_account_info = ctx.accounts.wsol_token_account.to_account_info();
     let after_wsol_balance = {
+        let wsol_account_info = ctx.accounts.wsol_token_account.to_account_info();
         let wsol_account_data = wsol_account_info.data.borrow();    
         u64::from_le_bytes(
             wsol_account_data[64..72].try_into().map_err(|_| ErrorCode::InvalidAccount)?

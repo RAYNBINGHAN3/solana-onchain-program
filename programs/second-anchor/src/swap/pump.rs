@@ -23,6 +23,7 @@ pub fn execute_pump_swap<'info>(
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
     // let wsol_mint = ctx.accounts.wsol_mint.key();
+    let mut max_or_min_amount_out = max_or_min_amount_out;
     if is_buy {
         if wsol_mint == pool_state.quote_mint {
             execute_pump_buy(
@@ -31,7 +32,7 @@ pub fn execute_pump_swap<'info>(
                 token_program_index,
                 token_account_index,
                 trade_amount,
-                max_or_min_amount_out,
+                &mut max_or_min_amount_out,
                 accounts,
                 ctx,
                 wsol_mint
@@ -71,7 +72,7 @@ pub fn execute_pump_swap<'info>(
                 token_program_index,
                 token_account_index,
                 trade_amount, // token in amount
-                max_or_min_amount_out, //此时max_or_min_amount_out为wsol wsol_amount为token
+                &mut max_or_min_amount_out, //此时max_or_min_amount_out为wsol wsol_amount为token
                 accounts,
                 ctx,
                 wsol_mint
@@ -87,7 +88,7 @@ fn execute_pump_buy<'info>(
     token_program_index: usize,
     token_account_index: usize,
     wsol_amount: u64,
-    max_token_amount_out: u64,
+    max_token_amount_out: &mut u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
     wsol_mint: Pubkey,
@@ -159,7 +160,19 @@ fn execute_pump_buy<'info>(
     //注意 如果quote mint是wsol 那么max_quote_amount_in计算真实最大quote amount in, 如果quote mint是token 不算了，因为token余额只有那么多
     let mut max_quote_amount_in = wsol_amount;
     if pool_state.quote_mint == wsol_mint {
-        max_quote_amount_in = pump_buy_base_input_internal(pool_state, max_token_amount_out)?;
+        max_quote_amount_in = pump_buy_base_input_internal(pool_state, *max_token_amount_out)?;
+        // let wsol_balance = {
+        //     let wsol_account_info = ctx.accounts.wsol_token_account.to_account_info();
+        //     let wsol_account_data = wsol_account_info.data.borrow();    
+        //     u64::from_le_bytes(
+        //         wsol_account_data[64..72].try_into().unwrap()
+        //     )
+        // };
+        // if max_quote_amount_in > wsol_balance {
+        //     msg!("Stupid pump! {}, {}", max_quote_amount_in, wsol_balance);
+        //     max_quote_amount_in = wsol_balance;
+        //     *max_token_amount_out = *max_token_amount_out * 999 / 1000;
+        // }
     }
     
     // msg!("max_quote_amount_in: {} wsol_amount: {}", max_quote_amount_in, wsol_amount);

@@ -2,8 +2,13 @@ use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{safe_mul_div_cast, safe_mul_shr_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
 use crate::utils::utils::get_transfer_fee;
+use crate::utils::whirlpool_256_math::{
+    get_amount_delta_a, get_amount_delta_b, try_get_amount_delta_a, try_get_amount_delta_b,
+    get_next_sqrt_price, AmountDeltaU64, FEE_RATE_MUL_VALUE, MAX_SQRT_PRICE_X64, MIN_SQRT_PRICE_X64
+};
 use anchor_lang::prelude::*;
 use std::cmp::min;
+use bytemuck::{Pod, Zeroable};
 
 pub mod whirlpool_program_id {
     use super::*;
@@ -34,56 +39,400 @@ pub struct WhirlpoolPoolState {
     pub price: u128,
 }
 
-/// Tick 状态数据结构 - 与 Whirlpool SDK 一致
-#[derive(Debug, Clone, Copy, Default)]
-pub struct WhirlpoolTick {
-    pub initialized: bool,
-    pub liquidity_net: i128,
-    pub liquidity_gross: u128,
-    // pub fee_growth_outside_a: u128,
-    // pub fee_growth_outside_b: u128,
-    // pub reward_growths_outside: [u128; 3], //不影响计算输出 不需要
+/// Whirlpool TickArray 类型枚举
+#[derive(Debug, Clone, Copy)]
+pub enum TickArrayType {
+    Fixed,
+    Dynamic,
 }
 
-impl WhirlpoolTick {
-    pub fn new(initialized: bool, liquidity_net: i128, liquidity_gross: u128) -> Self {
-        Self {
-            initialized,
-            liquidity_net,
-            liquidity_gross,
+/// Whirlpool TickArray - 统一接口支持Fixed和Dynamic两种格式
+pub struct WhirlpoolTickArrayRef<'a> {
+    account_info: &'a AccountInfo<'a>,
+    array_type: TickArrayType,
+}
+
+/// Dynamic Tick Array 的 discriminator - 从官方SDK复制
+pub const DYNAMIC_TICK_ARRAY_DISCRIMINATOR: [u8; 8] = [17, 216, 246, 142, 225, 199, 218, 56];
+/// Fixed Tick Array 的 discriminator - 从官方SDK复制  
+pub const FIXED_TICK_ARRAY_DISCRIMINATOR: [u8; 8] = [42, 50, 55, 254, 208, 36, 111, 186];
+
+/// Dynamic Tick 枚举 - 完全按照官方SDK定义
+#[derive(Debug, Clone, Copy, Default)]
+pub enum DynamicTick {
+    #[default]
+    Uninitialized,
+    Initialized(DynamicTickData),
+}
+
+/// Dynamic Tick Data - 完全按照官方SDK定义
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DynamicTickData {
+    pub liquidity_net: i128,
+    pub liquidity_gross: u128,
+    pub fee_growth_outside_a: u128,
+    pub fee_growth_outside_b: u128,
+    pub reward_growths_outside: [u128; NUM_REWARDS],
+}
+
+impl DynamicTick {
+    /// 🎯 完全按照官方SDK定义的常量
+    pub const UNINITIALIZED_LEN: usize = 1;
+    pub const INITIALIZED_LEN: usize = 113; // 1 (variant) + 112 (DynamicTickData::LEN)
+    
+    /// 转换为标准Tick格式
+    pub fn to_tick(self) -> WhirlpoolTick {
+        match self {
+            DynamicTick::Uninitialized => WhirlpoolTick::default(),
+            DynamicTick::Initialized(data) => WhirlpoolTick {
+                initialized: 1,
+                liquidity_net: data.liquidity_net,
+                liquidity_gross: data.liquidity_gross,
+                fee_growth_outside_a: data.fee_growth_outside_a,
+                fee_growth_outside_b: data.fee_growth_outside_b,
+                reward_growths_outside: data.reward_growths_outside,
+            },
         }
     }
 }
 
-/// Tick Array 状态数据结构 - 与 Whirlpool SDK 一致
-#[derive(Debug, Clone)]
-pub struct WhirlpoolTickArray {
-    pub start_tick_index: i32,
-    pub ticks: Box<Vec<WhirlpoolTick>>,
-    // pub whirlpool: Pubkey,
+impl<'a> WhirlpoolTickArrayRef<'a> {
+    /// 创建新的TickArray引用 - 自动检测类型
+    pub fn new(account_info: &'a AccountInfo<'a>) -> Result<Self> {
+        let array_type = Self::detect_array_type(account_info)?;
+        Ok(Self { account_info, array_type })
+    }
+    
+    /// 检测TickArray类型 - 通过discriminator
+    fn detect_array_type(account_info: &AccountInfo) -> Result<TickArrayType> {
+        let data = account_info.try_borrow_data()?;
+        if data.len() < 8 {
+            return Err(ErrorCode::InvalidAccountData.into());
+        }
+        
+        let discriminator: [u8; 8] = data[0..8].try_into().unwrap();
+        match discriminator {
+            FIXED_TICK_ARRAY_DISCRIMINATOR => Ok(TickArrayType::Fixed),
+            DYNAMIC_TICK_ARRAY_DISCRIMINATOR => Ok(TickArrayType::Dynamic),
+            _ => {
+                msg!("Unknown tick array discriminator: {:?}", discriminator);
+                Err(ErrorCode::InvalidAccountData.into())
+            }
+        }
+    }
+    
+    /// 获取start_tick_index - 支持两种格式
+    pub fn start_tick_index(&self) -> i32 {
+        let data = self.account_info.try_borrow_data().unwrap();
+        match self.array_type {
+            TickArrayType::Fixed => {
+                // Fixed: discriminator(8) + start_tick_index(4)
+                i32::from_le_bytes(data[8..12].try_into().unwrap())
+            }
+            TickArrayType::Dynamic => {
+                // Dynamic: discriminator(8) + start_tick_index(4)
+                i32::from_le_bytes(data[8..12].try_into().unwrap())
+            }
+        }
+    }
+    
+    /// 获取whirlpool地址 - 支持两种格式
+    pub fn whirlpool(&self) -> Pubkey {
+        let data = self.account_info.try_borrow_data().unwrap();
+        match self.array_type {
+            TickArrayType::Fixed => {
+                // Fixed: discriminator(8) + start_tick_index(4) + ticks(9944) + whirlpool(32)
+                let offset = 8 + 4 + TICK_ARRAY_SIZE * std::mem::size_of::<WhirlpoolTick>();
+                Pubkey::try_from(&data[offset..offset + 32]).unwrap()
+            }
+            TickArrayType::Dynamic => {
+                // Dynamic: discriminator(8) + start_tick_index(4) + whirlpool(32)
+                Pubkey::try_from(&data[12..44]).unwrap()
+            }
+        }
+    }
+    
+    /// 获取tick bitmap (仅Dynamic使用)
+    fn get_tick_bitmap(&self) -> Option<u128> {
+        match self.array_type {
+            TickArrayType::Fixed => None,
+            TickArrayType::Dynamic => {
+                let data = self.account_info.try_borrow_data().unwrap();
+                // Dynamic: discriminator(8) + start_tick_index(4) + whirlpool(32) + tick_bitmap(16)
+                Some(u128::from_le_bytes(data[44..60].try_into().unwrap()))
+            }
+        }
+    }
+    
+    /// 获取指定偏移的tick - 支持两种格式
+    pub fn get_tick_by_offset(&self, offset: usize) -> Result<WhirlpoolTick> {
+        if offset >= TICK_ARRAY_SIZE {
+            return Err(ErrorCode::InvalidTickIndex.into());
+        }
+        
+        let data = self.account_info.try_borrow_data()?;
+        match self.array_type {
+            TickArrayType::Fixed => {
+                // Fixed: discriminator(8) + start_tick_index(4) + ticks[offset]
+                let tick_offset = 8 + 4 + offset * std::mem::size_of::<WhirlpoolTick>();
+                let tick_data = &data[tick_offset..tick_offset + std::mem::size_of::<WhirlpoolTick>()];
+                let tick: &WhirlpoolTick = bytemuck::from_bytes(tick_data);
+                Ok(*tick)
+            }
+            TickArrayType::Dynamic => {
+                // 🎯 Dynamic: 使用官方SDK的byte_offset算法
+                let byte_offset = self.calculate_dynamic_byte_offset(offset as isize)?;
+                self.get_dynamic_tick_at_byte_offset(byte_offset)
+            }
+        }
+    }
+    
+    /// 🎯 计算Dynamic Tick Array的字节偏移 - 完全按照官方SDK实现
+    /// 根据bitmap计算已初始化tick的数量，然后计算字节偏移
+    fn calculate_dynamic_byte_offset(&self, tick_offset: isize) -> Result<usize> {
+        if tick_offset < 0 {
+            return Err(ErrorCode::InvalidTickIndex.into());
+        }
+        
+        let data = self.account_info.try_borrow_data()?;
+        // Dynamic: discriminator(8) + start_tick_index(4) + whirlpool(32) + tick_bitmap(16) + tick_data
+        let bitmap_offset = 8 + 4 + 32; // 44 bytes
+        if data.len() < bitmap_offset + 16 {
+            return Err(ErrorCode::InvalidAccountData.into());
+        }
+        
+        // 读取bitmap - 16字节 u128
+        let bitmap_bytes: [u8; 16] = data[bitmap_offset..bitmap_offset + 16].try_into().unwrap();
+        let tick_bitmap = u128::from_le_bytes(bitmap_bytes);
+        
+        // 🎯 官方SDK的byte_offset算法
+        let mask = (1u128 << tick_offset) - 1;
+        let initialized_ticks = (tick_bitmap & mask).count_ones() as usize;
+        let uninitialized_ticks = tick_offset as usize - initialized_ticks;
+        
+        // 计算字节偏移：已初始化tick * 113字节 + 未初始化tick * 1字节
+        let byte_offset = initialized_ticks * 113 + uninitialized_ticks * 1; // DynamicTick::INITIALIZED_LEN = 113, UNINITIALIZED_LEN = 1
+        Ok(byte_offset)
+    }
+    
+    /// 🎯 从字节偏移获取Dynamic tick数据 - 完全按照官方SDK实现
+    fn get_dynamic_tick_at_byte_offset(&self, byte_offset: usize) -> Result<WhirlpoolTick> {
+        let data = self.account_info.try_borrow_data()?;
+        let tick_data_start = 8 + 4 + 32 + 16; // discriminator + start_tick_index + whirlpool + bitmap
+        let actual_offset = tick_data_start + byte_offset;
+        
+        // 🎯 关键修复：按照官方SDK，总是尝试读取INITIALIZED_LEN长度
+        if data.len() < actual_offset + DynamicTick::INITIALIZED_LEN {
+            return Err(ErrorCode::InvalidDynTick.into());
+        }
+        
+        // 🎯 按照官方SDK：使用DynamicTick::deserialize方法
+        let mut tick_data = &data[actual_offset..actual_offset + DynamicTick::INITIALIZED_LEN];
+        
+        // 模拟DynamicTick::deserialize的行为
+        let variant = tick_data[0];
+        match variant {
+            0 => {
+                // Uninitialized variant
+                Ok(WhirlpoolTick::default())
+            }
+            1 => {
+                // Initialized variant - 解析DynamicTickData
+                let liquidity_net = i128::from_le_bytes(tick_data[1..17].try_into().unwrap());
+                let liquidity_gross = u128::from_le_bytes(tick_data[17..33].try_into().unwrap());
+                let fee_growth_outside_a = u128::from_le_bytes(tick_data[33..49].try_into().unwrap());
+                let fee_growth_outside_b = u128::from_le_bytes(tick_data[49..65].try_into().unwrap());
+                
+                let mut reward_growths_outside = [0u128; NUM_REWARDS];
+                for i in 0..NUM_REWARDS {
+                    let start = 65 + i * 16;
+                    reward_growths_outside[i] = u128::from_le_bytes(tick_data[start..start + 16].try_into().unwrap());
+                }
+                
+                Ok(WhirlpoolTick {
+                    initialized: 1,
+                    liquidity_net,
+                    liquidity_gross,
+                    fee_growth_outside_a,
+                    fee_growth_outside_b,
+                    reward_growths_outside,
+                })
+            }
+            _ => {
+                // 无效的variant
+                Err(ErrorCode::InvalidDynTick.into())
+            }
+        }
+    }
+    
+  
+    /// 根据tick_index和tick_spacing获取tick
+    pub fn get_tick(&self, tick_index: i32, tick_spacing: u16) -> Result<WhirlpoolTick> {
+        let tick_offset = self.get_tick_offset(tick_index, tick_spacing)?;
+        if tick_offset < 0 || tick_offset >= TICK_ARRAY_SIZE as isize {
+            return Err(ErrorCode::InvalidTickIndex.into());
+        }
+        self.get_tick_by_offset(tick_offset as usize)
+    }
+    
+    /// 计算tick在数组中的偏移量 - 完全按照官方SDK的get_offset实现
+    pub fn get_tick_offset(&self, tick_index: i32, tick_spacing: u16) -> Result<isize> {
+        if tick_spacing == 0 {
+            return Err(ErrorCode::InvalidTickSpacing.into());
+        }
+        
+        let start_tick_index = self.start_tick_index();
+        // 完全按照官方SDK的get_offset实现
+        let lhs = tick_index - start_tick_index;
+        let rhs = tick_spacing as i32;
+        let d = lhs / rhs;
+        let r = lhs % rhs;
+        let offset = if r < 0 { d - 1 } else { d };
+        
+        Ok(offset as isize)
+    }
+    
+    /// 获取下一个初始化的 tick - 支持两种格式，与官方SDK逻辑一致
+    pub fn get_next_initialized_tick_index(
+        &self,
+        tick_index: i32,
+        tick_spacing: u16,
+        a_to_b: bool,
+    ) -> Option<i32> {
+        match self.array_type {
+            TickArrayType::Fixed => self.get_next_initialized_tick_fixed(tick_index, tick_spacing, a_to_b),
+            TickArrayType::Dynamic => self.get_next_initialized_tick_dynamic(tick_index, tick_spacing, a_to_b),
+        }
+    }
+    
+    /// Fixed格式的下一个初始化tick搜索
+    fn get_next_initialized_tick_fixed(&self, tick_index: i32, tick_spacing: u16, a_to_b: bool) -> Option<i32> {
+        let start_tick_index = self.start_tick_index();
+        let mut search_index = tick_index;
+        
+        if a_to_b {
+            // 向左搜索（价格下降）
+            while search_index >= start_tick_index {
+                if let Ok(tick) = self.get_tick(search_index, tick_spacing) {
+                    if tick.is_initialized() && search_index < tick_index {
+                        return Some(search_index);
+                    }
+                }
+                search_index -= tick_spacing as i32;
+            }
+        } else {
+            // 向右搜索（价格上升）
+            search_index += tick_spacing as i32;
+            let max_tick = start_tick_index + TICK_ARRAY_SIZE as i32 * tick_spacing as i32;
+            while search_index < max_tick {
+                if let Ok(tick) = self.get_tick(search_index, tick_spacing) {
+                    if tick.is_initialized() {
+                        return Some(search_index);
+                    }
+                }
+                search_index += tick_spacing as i32;
+            }
+        }
+        
+        None
+    }
+    
+    /// Dynamic格式的下一个初始化tick搜索 - 使用bitmap优化，完全按照官方SDK实现
+    fn get_next_initialized_tick_dynamic(&self, tick_index: i32, tick_spacing: u16, a_to_b: bool) -> Option<i32> {
+        let start_tick_index = self.start_tick_index();
+        
+        // 检查搜索范围 - 完全按照官方SDK的in_search_range实现
+        let mut lower = start_tick_index;
+        let mut upper = start_tick_index + TICK_ARRAY_SIZE as i32 * tick_spacing as i32;
+        if !a_to_b {
+            // For b_to_a, shift the range by -tick_spacing
+            lower -= tick_spacing as i32;
+            upper -= tick_spacing as i32;
+        }
+        
+        if tick_index < lower || tick_index >= upper {
+            return None;
+        }
+        
+        // 计算当前偏移
+        let mut curr_offset = match self.get_tick_offset(tick_index, tick_spacing) {
+            Ok(offset) => offset as i32,
+            Err(_) => return None,
+        };
+        
+        // For a_to_b searches, the search moves to the left. The next possible init-tick can be the 1st tick in the current offset
+        // For b_to_a searches, the search moves to the right. The next possible init-tick cannot be within the current offset
+        if !a_to_b {
+            curr_offset += 1;
+        }
+        
+        let bitmap = self.get_tick_bitmap().unwrap();
+        while (0..TICK_ARRAY_SIZE as i32).contains(&curr_offset) {
+            let initialized = (bitmap & (1u128 << curr_offset)) != 0;
+            if initialized {
+                return Some((curr_offset * tick_spacing as i32) + start_tick_index);
+            }
+            
+            curr_offset = if a_to_b {
+                curr_offset - 1
+            } else {
+                curr_offset + 1
+            };
+        }
+        
+        None
+    }
 }
 
-/// Whirlpool 参数 - 包含 tick arrays
-#[derive(Debug, Clone)]
-pub struct WhirlpoolParams {
-    pub tick_arrays: Box<Vec<WhirlpoolTickArray>>,
+/// Whirlpool 参数 - 包含 tick arrays (零拷贝版本)
+pub struct WhirlpoolParams<'a> {
+    pub tick_arrays: Vec<WhirlpoolTickArrayRef<'a>>,
     pub sqrt_price_limit: u128,
     pub oracle_info: Box<Option<AdaptiveFeeInfo>>,
 }
 
 
-// 常量定义 - 与官方SDK一致
-const FEE_RATE_MUL_VALUE: u64 = 1_000_000;
-const Q64_RESOLUTION: u32 = 64;
-const TICK_ARRAY_SIZE: i32 = 88; // Whirlpool tick array size
+// 常量定义 - 只保留Whirlpool特有的常量
+const TICK_ARRAY_SIZE: usize = 88; // Whirlpool tick array size
+const NUM_REWARDS: usize = 3;
+
+/// 官方Tick结构 - 完全按照官方SDK定义 (113字节)
+#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
+#[repr(C, packed)]
+pub struct WhirlpoolTick {
+    pub initialized: u8,                            // 1 byte (0 = false, 1 = true)
+    pub liquidity_net: i128,                        // 16 bytes  
+    pub liquidity_gross: u128,                      // 16 bytes
+    pub fee_growth_outside_a: u128,                 // 16 bytes
+    pub fee_growth_outside_b: u128,                 // 16 bytes
+    pub reward_growths_outside: [u128; NUM_REWARDS], // 48 bytes (16 * 3)
+}
+
+impl WhirlpoolTick {
+    /// 检查tick是否已初始化
+    pub fn is_initialized(&self) -> bool {
+        self.initialized != 0
+    }
+}
+
+/// 官方FixedTickArray结构 - 完全按照官方SDK定义
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[repr(C, packed)]
+pub struct WhirlpoolFixedTickArray {
+    pub start_tick_index: i32,                      // 4 bytes
+    pub ticks: [WhirlpoolTick; TICK_ARRAY_SIZE],     // 88 * 113 = 9944 bytes
+    pub whirlpool: Pubkey,                          // 32 bytes
+}
+
+impl WhirlpoolTick {
+    pub const LEN: usize = 113;
+}
 
 // 自适应费率相关常量
 pub const FEE_RATE_HARD_LIMIT: u32 = 100_000; // 10%
 pub const VOLATILITY_ACCUMULATOR_SCALE_FACTOR: u32 = 1000;
 pub const ADAPTIVE_FEE_CONTROL_FACTOR_DENOMINATOR: u32 = 1_000_000;
 pub const NO_EXPLICIT_SQRT_PRICE_LIMIT: u128 = 0u128;
-pub const MAX_SQRT_PRICE_X64: u128 = 79226673515401279992447579055;
-pub const MIN_SQRT_PRICE_X64: u128 = 4295048016;
 pub const MAX_TICK_INDEX: i32 = 443636;
 pub const MIN_TICK_INDEX: i32 = -443636;
 
@@ -567,9 +916,7 @@ pub fn parse_whirlpool_pool_data(
     );
     
     let pool_data = pool_account.data.borrow();
-    if pool_data.len() < 653 { // Whirlpool 账户最小长度
-        return Err(ErrorCode::InvalidAccountData.into());
-    }
+    
 
     // 解析 Whirlpool 账户数据 (跳过 discriminator 8字节)
     // whirlpoolsConfig: 8-40 (32字节)
@@ -638,66 +985,68 @@ pub fn parse_whirlpool_pool_data(
 
 
 
-/// 解析 Whirlpool Tick Array 数据 - 完全按照官方 SDK
-fn parse_whirlpool_tick_array(tick_array_info: &AccountInfo) -> Result<Option<WhirlpoolTickArray>> {
+/// 解析 Whirlpool Tick Array 数据 - 支持Fixed和Dynamic两种格式
+fn parse_whirlpool_tick_array<'a>(tick_array_info: &'a AccountInfo<'a>) -> Result<Option<WhirlpoolTickArrayRef<'a>>> {
     if *tick_array_info.owner != whirlpool_program_id::ID {
-        return Ok(None); // 未初始化的 tick array
+        msg!("Invalid whirlpool pool owner: {:?}", tick_array_info.key());
+        return Ok(None);
     }
 
     let data = tick_array_info.try_borrow_data()?;
-    const TICK_SIZE: usize = 113; // 官方 Tick::LEN = 113
-    const EXPECTED_SIZE: usize = 8 + 4 + (TICK_ARRAY_SIZE as usize * TICK_SIZE) + 32;
     
-    if data.len() < EXPECTED_SIZE {
-        return Err(ErrorCode::InvalidAccountData.into());
+    // 检查最小长度：8 bytes discriminator
+    if data.len() < 8 {
+        msg!("Invalid whirlpool tick array (too small): {:?}", tick_array_info.key());
+        return Ok(None);
     }
 
-    // 解析 FixedTickArray 结构 - 按照官方布局
-    // discriminator: 8 bytes
-    // start_tick_index: 4 bytes (offset: 8)
-    let start_tick_index = i32::from_le_bytes(data[8..12].try_into().unwrap());
-    
-    // ticks: [Tick; 88] (offset: 12, 每个 Tick 113 字节)
-    // 🚀 优化：预分配精确容量的Vec，避免多次push扩容
-    let mut ticks = Vec::with_capacity(TICK_ARRAY_SIZE as usize);
-
-    for i in 0..(TICK_ARRAY_SIZE as usize) {
-        let offset = 12 + i * TICK_SIZE; // 每个 Tick 113 字节
-        
-        if offset + TICK_SIZE > data.len() {
-            return Err(ErrorCode::InvalidAccountData.into());
+    // 🎯 关键改进：使用新的构造方式，自动检测格式
+    match WhirlpoolTickArrayRef::new(tick_array_info) {
+        Ok(tick_array_ref) => {
+            // msg!("tick_array_address: {:?}, type: {:?}", tick_array_info.key(), tick_array_ref.array_type);
+            // let start_tick_index = tick_array_ref.start_tick_index();
+            // msg!("start_tick_index: {}", start_tick_index);
+            Ok(Some(tick_array_ref))
         }
-        
-        // Tick 结构 (113 字节总计):
-        // initialized: 1 byte
-        let initialized = data[offset] != 0;
-        
-        // liquidity_net: 16 bytes (offset: 1)
-        let liquidity_net = i128::from_le_bytes(data[offset + 1..offset + 17].try_into().unwrap());
-        
-        // liquidity_gross: 16 bytes (offset: 17)
-        let liquidity_gross = u128::from_le_bytes(data[offset + 17..offset + 33].try_into().unwrap());
-        
-        ticks.push(WhirlpoolTick::new(initialized, liquidity_net, liquidity_gross));
+        Err(e) => {
+            msg!("Failed to parse tick array {:?}: {:?}", tick_array_info.key(), e);
+            Ok(None)
+        }
     }
-  
-    Ok(Some(WhirlpoolTickArray {
-        start_tick_index,
-        ticks: Box::new(ticks),  
-    }))
 }
 
 
-/// 解析所有 Whirlpool Tick Arrays
-pub fn parse_whirlpool_tick_arrays(
-    tick_array_infos: &[&AccountInfo],
-) -> Result<Vec<WhirlpoolTickArray>> {
+// /// 解析所有 Whirlpool Tick Arrays - 零拷贝版本
+// pub fn parse_whirlpool_tick_arrays<'a>(
+//     tick_array_infos: &'a [&'a AccountInfo<'a>],
+// ) -> Result<Vec<WhirlpoolTickArrayRef<'a>>> {
+//     let mut tick_arrays = Vec::with_capacity(3);
+    
+//     for &tick_array_info in tick_array_infos {
+//         if let Some(tick_array_ref) = parse_whirlpool_tick_array(tick_array_info)? {
+//             tick_arrays.push(tick_array_ref);
+//         }
+//     }
+    
+//     Ok(tick_arrays)
+// }
+
+/// 解析三个 Whirlpool Tick Arrays - 避免生命周期问题
+pub fn parse_whirlpool_tick_arrays_three<'a>(
+    tick_array_0: &'a AccountInfo<'a>,
+    tick_array_1: &'a AccountInfo<'a>,
+    tick_array_2: &'a AccountInfo<'a>,
+) -> Result<Vec<WhirlpoolTickArrayRef<'a>>> {
     let mut tick_arrays = Vec::with_capacity(3);
     
-    for &tick_array in tick_array_infos {
-        if let Some(tick_array) = parse_whirlpool_tick_array(tick_array)? {
-            tick_arrays.push(tick_array);
-        }
+    if let Some(tick_array_ref) = parse_whirlpool_tick_array(tick_array_0)? {
+        tick_arrays.push(tick_array_ref);
+    }
+    if let Some(tick_array_ref) = parse_whirlpool_tick_array(tick_array_1)? {
+        tick_arrays.push(tick_array_ref);
+    }
+    if let Some(tick_array_ref) = parse_whirlpool_tick_array(tick_array_2)? {
+        tick_arrays.push(tick_array_ref);
     }
     
     Ok(tick_arrays)
@@ -776,6 +1125,7 @@ pub fn parse_whirlpool_oracle_adaptive_fee(oracle_info: &AccountInfo) -> Result<
     }))
 }
 
+
 /// 计算 Whirlpool 价格 - 
 pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState, wsol_mint: Pubkey) -> Result<()> {
     if pool_state.liquidity == 0 {
@@ -784,17 +1134,18 @@ pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState, wsol_mint:
     }
 
     let mut price_q64 = pool_state.sqrt_price;
-
+    
     // sqrt_price^2 得到实际价格 (Q64格式) - 使用安全数学函数
     // price_q64 = price_q64.checked_mul(price_q64).unwrap().checked_shr(64).unwrap();
     price_q64 = safe_mul_shr_cast(price_q64, price_q64, 64, Rounding::Down);
-
+   
     // 如果WSOL不是token0，需要取倒数
     if pool_state.token_mint_b != wsol_mint {
         // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
         price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
+        
     }
-
+ 
     pool_state.price = price_q64;
     Ok(())
 }
@@ -803,66 +1154,7 @@ pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState, wsol_mint:
 
 // ======================== Tick Array 管理函数 ========================
 
-impl WhirlpoolTickArray {
-    /// 获取指定 tick index 对应的 tick
-    fn get_tick(&self, tick_index: i32, tick_spacing: u16) -> Result<&WhirlpoolTick> {
-        let tick_offset = self.get_tick_offset(tick_index, tick_spacing)?;
-        if tick_offset < 0 || tick_offset >= TICK_ARRAY_SIZE as isize {
-            return Err(ErrorCode::InvalidTickIndex.into());
-        }
-        Ok(&self.ticks[tick_offset as usize])
-    }
-    
-    /// 计算 tick 在数组中的偏移量
-    fn get_tick_offset(&self, tick_index: i32, tick_spacing: u16) -> Result<isize> {
-        if tick_index < self.start_tick_index {
-            return Err(ErrorCode::InvalidTickIndex.into());
-        }
-        
-        let tick_offset = (tick_index - self.start_tick_index) / tick_spacing as i32;
-        if tick_offset >= TICK_ARRAY_SIZE {
-            return Err(ErrorCode::InvalidTickIndex.into());
-        }
-        
-        Ok(tick_offset as isize)
-    }
-    
-    /// 获取下一个初始化的 tick
-    fn get_next_initialized_tick_index(
-        &self,
-        tick_index: i32,
-        tick_spacing: u16,
-        a_to_b: bool,
-    ) -> Option<i32> {
-        let mut search_index = tick_index;
-        
-        if a_to_b {
-            // 向左搜索（价格下降）
-            while search_index >= self.start_tick_index {
-                if let Ok(tick) = self.get_tick(search_index, tick_spacing) {
-                    if tick.initialized && search_index < tick_index {
-                        return Some(search_index);
-                    }
-                }
-                search_index -= tick_spacing as i32;
-            }
-        } else {
-            // 向右搜索（价格上升）
-            search_index += tick_spacing as i32;
-            let max_tick = self.start_tick_index + TICK_ARRAY_SIZE * tick_spacing as i32;
-            while search_index < max_tick {
-                if let Ok(tick) = self.get_tick(search_index, tick_spacing) {
-                    if tick.initialized {
-                        return Some(search_index);
-                    }
-                }
-                search_index += tick_spacing as i32;
-            }
-        }
-        
-        None
-    }
-}
+// Tick Array 管理函数已移到 WhirlpoolTickArrayRef 实现中
 
 // /// 查找包含指定 tick 的 tick array
 // fn find_tick_array_for_tick(
@@ -879,9 +1171,9 @@ impl WhirlpoolTickArray {
 //     None
 // }
 
-/// 获取下一个初始化的 tick - 从指定的数组索引开始搜索
-fn get_next_initialized_tick(
-    tick_arrays: &[WhirlpoolTickArray],
+/// 获取下一个初始化的 tick - 从指定的数组索引开始搜索，跳过无效的tick arrays
+fn get_next_initialized_tick<'a>(
+    tick_arrays: &[WhirlpoolTickArrayRef<'a>],
     current_tick: i32,
     tick_spacing: u16,
     a_to_b: bool,
@@ -901,6 +1193,7 @@ fn get_next_initialized_tick(
         }
         
         let array = &tick_arrays[array_index];
+     
         
         // 在当前数组中搜索
         if let Some(next_tick) = array.get_next_initialized_tick_index(search_tick, tick_spacing, a_to_b) {
@@ -914,14 +1207,14 @@ fn get_next_initialized_tick(
             }
             array_index -= 1;
             // 设置搜索位置为新数组的末尾
-            search_tick = array.start_tick_index + (TICK_ARRAY_SIZE * tick_spacing as i32) - 1;
+            search_tick = array.start_tick_index() + (TICK_ARRAY_SIZE as i32 * tick_spacing as i32) - 1;
         } else {
             array_index += 1;
             if array_index >= tick_arrays.len() {
                 return Ok((tick_arrays.len() - 1, MAX_TICK_INDEX));
             }
             // 设置搜索位置为新数组的开始
-            search_tick = tick_arrays[array_index].start_tick_index;
+            search_tick = tick_arrays[array_index].start_tick_index();
         }
     }
 }
@@ -944,11 +1237,11 @@ fn get_next_sqrt_prices(
 }
 
 /// 获取 tick 在 tick array 中的偏移 - 完全按照官方 SDK
-fn get_tick_offset(
+fn get_tick_offset<'a>(
     array_index: usize,
     tick_index: i32,
     tick_spacing: u16,
-    tick_arrays: &[WhirlpoolTickArray],
+    tick_arrays: &[WhirlpoolTickArrayRef<'a>],
 ) -> Result<isize> {
     if tick_spacing == 0 {
         return Err(ErrorCode::InvalidTickIndex.into());
@@ -958,7 +1251,7 @@ fn get_tick_offset(
         .ok_or(ErrorCode::InvalidTickIndex)?;
     
     // 计算偏移 - 完全按照官方 get_offset 实现
-    let lhs = tick_index - array.start_tick_index;
+    let lhs = tick_index - array.start_tick_index();
     let rhs = tick_spacing as i32;
     let d = lhs / rhs;
     let r = lhs % rhs;
@@ -969,16 +1262,16 @@ fn get_tick_offset(
 
 /// 完整的 Whirlpool swap 计算 - 包含 tick arrays 和跨 tick 逻辑
 /// 只支持 amount_specified_is_input = true 的情况
-fn whirlpool_swap_internal(
+fn whirlpool_swap_internal<'a>(
     pool_state: &WhirlpoolPoolState,
-    tick_arrays: &[WhirlpoolTickArray],
+    tick_arrays: &[WhirlpoolTickArrayRef<'a>],
     amount: u64,
     sqrt_price_limit: u128,
     a_to_b: bool,
     adaptive_fee_info: &Option<AdaptiveFeeInfo>,
     timestamp: u64,
 ) -> Result<SwapUpdate> {
-    
+
     // 设置价格限制
     let adjusted_sqrt_price_limit = if sqrt_price_limit == NO_EXPLICIT_SQRT_PRICE_LIMIT {
         if a_to_b {
@@ -1069,7 +1362,7 @@ fn whirlpool_swap_internal(
                 // 获取 tick 并更新流动性
                 if let Some(array) = tick_arrays.get(next_array_index) {
                     if let Ok(tick) = array.get_tick(next_tick_index, pool_state.tick_spacing) {
-                        if tick.initialized {
+                        if tick.is_initialized() {
                             let liquidity_net = if a_to_b {
                                 -tick.liquidity_net
                             } else {
@@ -1164,8 +1457,14 @@ pub fn whirlpool_quote_exact_input_wsol(
         return Ok(0);
     }
     
+
     let params = whirlpool_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
-    
+   
+    if params.tick_arrays.is_empty() {
+        return Ok(0);
+    }
+
+
     // 确定交易方向
     let a_to_b = pool_state.token_mint_a == wsol_mint;
     
@@ -1220,6 +1519,10 @@ pub fn whirlpool_quote_exact_input_token(
     }
     
     let params = whirlpool_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
+
+    if params.tick_arrays.is_empty() {
+        return Ok(0);
+    }
 
     // 确定交易方向
     let a_to_b = pool_state.token_mint_b == wsol_mint;
@@ -1386,29 +1689,22 @@ fn get_sqrt_price_negative_tick(tick: i32) -> u128 {
     ratio
 }
 
-/// 乘法并右移96位 - 按照官方 Whirlpool SDK 实现
+/// 乘法并右移96位 - 使用安全的数学运算避免溢出
 fn mul_shift_96(n0: u128, n1: u128) -> u128 {
-    // 简化版本的 256 位乘法和移位
-    let a = n0 as u64;
-    let b = (n0 >> 64) as u64;
-    let c = n1 as u64;
-    let d = (n1 >> 64) as u64;
+    // 使用ruint进行256位数学运算，避免溢出
+    let product = ruint::aliases::U256::from(n0)
+        .checked_mul(ruint::aliases::U256::from(n1))
+        .unwrap_or(ruint::aliases::U256::MAX);
     
-    let ac = (a as u128) * (c as u128);
-    let ad = (a as u128) * (d as u128);
-    let bc = (b as u128) * (c as u128);
-    let bd = (b as u128) * (d as u128);
+    // 右移96位
+    let result: ruint::aliases::U256 = product >> 96;
     
-    let mid = ad + bc;
-    let high = bd + (mid >> 64);
-    let low = (mid << 64) + ac;
-    
-    // 检查是否溢出
-    let carry = if low < ac { 1 } else { 0 };
-    let high = high + carry;
-    
-    // 右移 96 位 = 右移 64 位然后再右移 32 位
-    ((high << 32) | (low >> 96)) as u128
+    // 转换为u128，如果溢出则使用最大值
+    if result > ruint::aliases::U256::from(u128::MAX) {
+        u128::MAX
+    } else {
+        result.as_limbs()[0] as u128
+    }
 }
 
  
@@ -1436,121 +1732,6 @@ struct SwapUpdate {
 }
 
 
-/// 从token A数量计算下一个sqrt价格 - 向上舍入
-/// 公式: sqrt_price_new = (sqrt_price * liquidity) / (liquidity ± amount * sqrt_price)
-fn get_next_sqrt_price_from_a_round_up(
-    sqrt_price: u128,
-    liquidity: u128,
-    amount: u64,
-    amount_specified_is_input: bool,
-) -> Result<u128> {
-    if amount == 0 {
-        return Ok(sqrt_price);
-    }
-
-    // product = sqrt_price * amount
-    let product = ruint::aliases::U256::from(sqrt_price)
-        .checked_mul(ruint::aliases::U256::from(amount as u128))
-        .ok_or(ErrorCode::CalculateOverflow)?;
-
-    // numerator = liquidity * sqrt_price << 64
-    let numerator = ruint::aliases::U256::from(liquidity)
-        .checked_mul(ruint::aliases::U256::from(sqrt_price))
-        .ok_or(ErrorCode::CalculateOverflow)?
-        .checked_shl(64)
-        .ok_or(ErrorCode::CalculateOverflow)?;
-
-    // liquidity_shift_left = liquidity << 64
-    let liquidity_shift_left = ruint::aliases::U256::from(liquidity) << 64;
-
-    // 防止除零错误
-    if !amount_specified_is_input && liquidity_shift_left <= product {
-        return Err(ErrorCode::CalculateOverflow.into());
-    }
-
-    let denominator = if amount_specified_is_input {
-        liquidity_shift_left + product
-    } else {
-        liquidity_shift_left - product
-    };
-
-    // 向上舍入除法
-    let quotient = numerator / denominator;
-    let remainder = numerator % denominator;
-    let price: ruint::aliases::U256 = if remainder != ruint::aliases::U256::ZERO {
-        quotient + ruint::aliases::U256::from(1u128)
-    } else {
-        quotient
-    };
-
-    if price > ruint::aliases::U256::from(u128::MAX) {
-        return Err(ErrorCode::SqrtPriceLimitOverflow.into());
-    }
-
-    let price_u128 = price.as_limbs()[0] as u128;
-    
-    if price_u128 < MIN_SQRT_PRICE_X64 || price_u128 > MAX_SQRT_PRICE_X64 {
-        return Err(ErrorCode::InvalidSqrtPrice.into());
-    }
-
-    Ok(price_u128)
-}
-
-/// 从token B数量计算下一个sqrt价格 - 向下舍入
-/// 公式: sqrt_price_new = sqrt_price ± (amount << 64) / liquidity
-fn get_next_sqrt_price_from_b_round_down(
-    sqrt_price: u128,
-    liquidity: u128,
-    amount: u64,
-    amount_specified_is_input: bool,
-) -> Result<u128> {
-    // amount_x64 = amount << 64
-    let amount_x64 = (amount as u128) << Q64_RESOLUTION;
-
-    // delta = amount_x64 / liquidity (向上或向下舍入)
-    let delta = if !amount_specified_is_input {
-        // 向上舍入
-        safe_mul_div_cast(amount_x64, ONE, liquidity, Rounding::Up)
-    } else {
-        // 向下舍入
-        safe_mul_div_cast(amount_x64, ONE, liquidity, Rounding::Down)
-    };
-
-    if amount_specified_is_input {
-        // 增加token B供应，价格上升
-        sqrt_price.checked_add(delta).ok_or(ErrorCode::InvalidSqrtPrice.into())
-    } else {
-        // 减少token B供应，价格下降
-        sqrt_price.checked_sub(delta).ok_or(ErrorCode::InvalidSqrtPrice.into())
-    }
-}
-
-/// 获取下一个sqrt价格 - 核心函数
-fn get_next_sqrt_price(
-    sqrt_price: u128,
-    liquidity: u128,
-    amount: u64,
-    amount_specified_is_input: bool,
-    a_to_b: bool,
-) -> Result<u128> {
-    if amount_specified_is_input == a_to_b {
-        // 我们固定token A
-        get_next_sqrt_price_from_a_round_up(
-            sqrt_price,
-            liquidity,
-            amount,
-            amount_specified_is_input,
-        )
-    } else {
-        // 我们固定token B
-        get_next_sqrt_price_from_b_round_down(
-            sqrt_price,
-            liquidity,
-            amount,
-            amount_specified_is_input,
-        )
-    }
-}
 
 /// 获取fixed token的数量变化
 fn get_amount_fixed_delta(
@@ -1566,14 +1747,14 @@ fn get_amount_fixed_delta(
             sqrt_price_target,
             liquidity,
             amount_specified_is_input,
-        )
+        ).map_err(|e| e.into())
     } else {
         get_amount_delta_b(
             sqrt_price_current,
             sqrt_price_target,
             liquidity,
             amount_specified_is_input,
-        )
+        ).map_err(|e| e.into())
     }
 }
 
@@ -1591,16 +1772,43 @@ fn get_amount_unfixed_delta(
             sqrt_price_target,
             liquidity,
             !amount_specified_is_input,
-        )
+        ).map_err(|e| e.into())
     } else {
         get_amount_delta_a(
             sqrt_price_current,
             sqrt_price_target,
             liquidity,
             !amount_specified_is_input,
-        )
+        ).map_err(|e| e.into())
     }
 }
+
+/// 尝试获取 fixed delta - 返回 AmountDeltaU64 枚举
+fn try_get_amount_fixed_delta(
+    sqrt_price_current: u128,
+    sqrt_price_target: u128,
+    liquidity: u128,
+    amount_specified_is_input: bool,
+    a_to_b: bool,
+) -> Result<AmountDeltaU64> {
+    if a_to_b == amount_specified_is_input {
+        try_get_amount_delta_a(
+            sqrt_price_current,
+            sqrt_price_target,
+            liquidity,
+            amount_specified_is_input,
+        ).map_err(|e| e.into())
+    } else {
+        try_get_amount_delta_b(
+            sqrt_price_current,
+            sqrt_price_target,
+            liquidity,
+            amount_specified_is_input,
+        ).map_err(|e| e.into())
+    }
+}
+
+
 
 /// 核心swap步骤计算 - 完全按照Whirlpool SDK实现
 /// 计算单个交换步骤 - 只支持 amount_specified_is_input = true
@@ -1621,36 +1829,26 @@ fn compute_swap_step(
         });
     }
 
-    // 计算初始的fixed delta来判断是否为max swap
-    let initial_amount_fixed_delta_result = get_amount_fixed_delta(
+    // 🎯 关键修复：使用 try_get_amount_fixed_delta 处理可能的溢出
+    let initial_amount_fixed_delta = try_get_amount_fixed_delta(
         sqrt_price_current,
         sqrt_price_target,
         liquidity,
         true, // amount_specified_is_input = true
         a_to_b,
-    );
+    )?;
 
-    // 扣除手续费后的可用数量 - 向下舍入
-    let amount_calc = safe_mul_div_cast(
-        amount_remaining as u128,
-        (FEE_RATE_MUL_VALUE - fee_rate as u64) as u128,
-        FEE_RATE_MUL_VALUE as u128,
-        Rounding::Down,
-    ) as u64;
+    // 🎯 关键修复：使用官方SDK的数学函数 - 扣除手续费后的可用数量
+    // 只有在 amount_specified_is_input = true 时才计算扣除费用后的数量
+    let amount_calc: u64 = if fee_rate == 0 {
+        amount_remaining
+    } else {
+        ((amount_remaining as u128) * (FEE_RATE_MUL_VALUE - fee_rate as u128) / FEE_RATE_MUL_VALUE) as u64
+    };
 
-    // 确定下一个价格
-    let next_sqrt_price = if let Ok(initial_fixed) = initial_amount_fixed_delta_result {
-        if initial_fixed <= amount_calc {
-            sqrt_price_target
-        } else {
-            get_next_sqrt_price(
-                sqrt_price_current,
-                liquidity,
-                amount_calc,
-                true, // amount_specified_is_input = true
-                a_to_b,
-            )?
-        }
+    // 🎯 关键修复：使用 lte 方法检查是否为 max swap
+    let next_sqrt_price = if initial_amount_fixed_delta.lte(amount_calc) {
+        sqrt_price_target
     } else {
         get_next_sqrt_price(
             sqrt_price_current,
@@ -1672,8 +1870,9 @@ fn compute_swap_step(
         a_to_b,
     )?;
 
-    // 重新计算fixed delta (amount_in) - 如果不是max swap或初始计算失败
-    let amount_fixed_delta = if !is_max_swap || initial_amount_fixed_delta_result.is_err() {
+    // 🎯 关键修复：重新计算fixed delta - 如果不是max swap或初始计算溢出
+    let amount_fixed_delta = if !is_max_swap || initial_amount_fixed_delta.exceeds_max() {
+        // next_sqrt_price 是通过 get_next_sqrt_price 计算的，结果应该在u64范围内
         get_amount_fixed_delta(
             sqrt_price_current,
             next_sqrt_price,
@@ -1682,25 +1881,33 @@ fn compute_swap_step(
             a_to_b,
         )?
     } else {
-        initial_amount_fixed_delta_result.unwrap()
+        // 结果在u64范围内
+        initial_amount_fixed_delta.value()
     };
 
     // amount_specified_is_input = true 时，固定输入，计算输出
     let amount_in = amount_fixed_delta;
     let amount_out = amount_unfixed_delta;
 
-    // 计算手续费 - 与官方逻辑完全一致
+    // 🎯 关键修复：按照官方SDK计算手续费
+    // 由于我们只支持 amount_specified_is_input = true，所以条件简化为 !is_max_swap
     let fee_amount = if !is_max_swap {
         // 非max swap时，手续费 = 剩余输入 - 实际输入
+        msg!("amount_remaining: {}, amount_in: {}", amount_remaining, amount_in);
         amount_remaining - amount_in
     } else {
         // max swap时，根据输入量反推手续费 - 向上舍入
-        safe_mul_div_cast(
-            amount_in as u128,
-            fee_rate as u128,
-            (FEE_RATE_MUL_VALUE - (fee_rate as u64)) as u128,
-            Rounding::Up,
-        ) as u64
+        if fee_rate == 0 {
+            0
+        } else {
+            let fee_amount_128 = (amount_in as u128 * fee_rate as u128) / (FEE_RATE_MUL_VALUE - fee_rate as u128);
+            let remainder = (amount_in as u128 * fee_rate as u128) % (FEE_RATE_MUL_VALUE - fee_rate as u128);
+            if remainder > 0 {
+                (fee_amount_128 + 1) as u64
+            } else {
+                fee_amount_128 as u64
+            }
+        }
     };
 
     Ok(SwapStepComputation {
@@ -1711,92 +1918,6 @@ fn compute_swap_step(
     })
 }
 
-
-
-/// 计算token A的数量变化 - 完全按照Whirlpool SDK实现
-/// 公式: Δt_a = (liquidity * (sqrt_price_lower - sqrt_price_upper)) / (sqrt_price_upper * sqrt_price_lower)
-fn get_amount_delta_a(
-    sqrt_price_0: u128,
-    sqrt_price_1: u128,
-    liquidity: u128,
-    round_up: bool,
-) -> Result<u64> {
-    let (sqrt_price_lower, sqrt_price_upper) = if sqrt_price_0 > sqrt_price_1 {
-        (sqrt_price_1, sqrt_price_0)
-    } else {
-        (sqrt_price_0, sqrt_price_1)
-    };
-
-    if sqrt_price_lower == 0 {
-        return Err(ErrorCode::InvalidSqrtPrice.into());
-    }
-
-    let sqrt_price_diff = sqrt_price_upper - sqrt_price_lower;
-
-    // 使用U256进行高精度计算 - numerator = liquidity * sqrt_price_diff << 64
-    let numerator = ruint::aliases::U256::from(liquidity)
-        .checked_mul(ruint::aliases::U256::from(sqrt_price_diff))
-        .ok_or(ErrorCode::CalculateOverflow)?
-        .checked_shl(64)
-        .ok_or(ErrorCode::CalculateOverflow)?;
-
-    // denominator = sqrt_price_upper * sqrt_price_lower
-    let denominator = ruint::aliases::U256::from(sqrt_price_upper)
-        .checked_mul(ruint::aliases::U256::from(sqrt_price_lower))
-        .ok_or(ErrorCode::CalculateOverflow)?;
-
-    let quotient = numerator / denominator;
-    let remainder = numerator % denominator;
-
-    let result: ruint::aliases::U256 = if round_up && remainder != ruint::aliases::U256::ZERO {
-        quotient + ruint::aliases::U256::from(1u128)
-    } else {
-        quotient
-    };
-
-    if result > ruint::aliases::U256::from(u64::MAX) {
-        return Err(ErrorCode::MaxTokenOverflow.into());
-    }
-
-    Ok(result.as_limbs()[0])
-}
-
-/// 计算token B的数量变化 - 完全按照Whirlpool SDK实现  
-/// 公式: Δt_b = liquidity * (sqrt_price_upper - sqrt_price_lower) / 2^64
-fn get_amount_delta_b(
-    sqrt_price_0: u128,
-    sqrt_price_1: u128,
-    liquidity: u128,
-    round_up: bool,
-) -> Result<u64> {
-    let (sqrt_price_lower, sqrt_price_upper) = if sqrt_price_0 > sqrt_price_1 {
-        (sqrt_price_1, sqrt_price_0)
-    } else {
-        (sqrt_price_0, sqrt_price_1)
-    };
-
-    let sqrt_price_diff = sqrt_price_upper - sqrt_price_lower;
-
-    // product = liquidity * sqrt_price_diff
-    let product = ruint::aliases::U256::from(liquidity)
-        .checked_mul(ruint::aliases::U256::from(sqrt_price_diff))
-        .ok_or(ErrorCode::CalculateOverflow)?;
-    
-    let quotient = product >> 64;
-    let should_round = round_up && (product & ruint::aliases::U256::from(u64::MAX)) > ruint::aliases::U256::ZERO;
-
-    let result: ruint::aliases::U256 = if should_round { 
-        quotient + ruint::aliases::U256::from(1u128) 
-    } else { 
-        quotient 
-    };
-
-    if result > ruint::aliases::U256::from(u64::MAX) {
-        return Err(ErrorCode::MaxTokenOverflow.into());
-    }
-
-    Ok(result.as_limbs()[0])
-}
 
  
 /// 这个函数计算从当前价格到目标价格范围内能够输入或输出的最大SOL数量
@@ -1832,11 +1953,7 @@ pub fn calculate_whirlpool_amount_in_range(
     match result {
         Ok(amount) => Ok(Some(amount)),
         Err(e) => {
-            if e == ErrorCode::MaxTokenOverflow.into() {
-                Ok(None) // 溢出时返回None，类似CLMM的处理方式
-            } else {
-                Err(e)
-            }
-        }
+            return Err(e.into());
+        }, 
     }
 }

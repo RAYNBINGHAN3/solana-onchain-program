@@ -62,7 +62,7 @@ pub mod zooey_go {
     use super::*;
 
     /// 比较多个token的多个池并进行全局套利分析
-    pub fn zooey<'a, 'b, 'c, 'info>(
+    pub fn zooey<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, ComparePrices<'info>>,
         min_profit: u32, // 最小利润
         is_fail: u8, // 0: 不失败，1: 失败
@@ -342,11 +342,11 @@ pub mod zooey_go {
 
 
 /// 计算最优买入SOL数量的辅助函数 - 优化版本，减少重复解析
-fn calculate_optimal_wsol_amount<'c, 'info>(
+fn calculate_optimal_wsol_amount<'info>(
     analysis: &comparison::GlobalArbitrageAnalysis,
     wsol_mint: Pubkey,
     wsol_token_account: &InterfaceAccount<TokenAccount>,
-    accounts: &'c [AccountInfo<'info>],
+    accounts: &'info [AccountInfo<'info>],
     min_profit: u32,
 ) -> Result<optimalamt::OptimizationResult> {
   

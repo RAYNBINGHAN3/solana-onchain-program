@@ -10,7 +10,7 @@ use crate::dex::dlmm::{
 };
 use crate::dex::pump::{calculate_pump_price, parse_pump_pool_data, PumpPoolState};
 use crate::dex::raydium::{calculate_raydium_price, parse_raydium_pool_data, RaydiumPoolState};
-use crate::dex::whirlpool::{parse_whirlpool_pool_data, WhirlpoolPoolState};
+use crate::dex::whirlpool::{parse_whirlpool_pool_data, WhirlpoolPoolState, calculate_whirlpool_price};
 use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{bps_to_q64, q64_mul, safe_mul_div_cast, Rounding};
 use crate::utils::u64x64_math::ONE;
@@ -618,6 +618,8 @@ fn parse_pool_with_state(
                 accounts,
                 &mut pool_state,
             )?;
+
+            calculate_whirlpool_price(&mut pool_state, wsol_mint)?;
 
             let parsed_state = ParsedPoolState::WHIRLPOOL { state: pool_state };
 

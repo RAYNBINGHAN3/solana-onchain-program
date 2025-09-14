@@ -74,6 +74,9 @@ pub enum ErrorCode {
 
     #[msg("Invalid tick index")]
     InvalidTickIndex,
+    
+    #[msg("Invalid tick spacing")]
+    InvalidTickSpacing,
 
     #[msg("Invalid sqrt price")]
     InvalidSqrtPrice,
@@ -86,6 +89,12 @@ pub enum ErrorCode {
 
     #[msg("Invalid tick array boundary")]
     InvalidTickArrayBoundary,
+
+    #[msg("Divide by zero")]
+    DivideByZero,
+
+    #[msg("Invalid dyn tick")]
+    InvalidDynTick,
 
     None,
 }
