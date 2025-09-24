@@ -19,6 +19,12 @@ use anchor_spl::{
     }
 };
 
+use crate::constant::{
+    CPMM_ACCOUNT_COUNT, DLMM_ACCOUNT_COUNT, DAMMV2_ACCOUNT_COUNT, 
+    PUMP_ACCOUNT_COUNT, RAYDIUM_ACCOUNT_COUNT, CLMM_ACCOUNT_COUNT, 
+    WHIRLPOOL_ACCOUNT_COUNT
+};
+
 
 #[derive(Debug, Clone)]
 pub struct TokenPoolGroup {
@@ -26,6 +32,10 @@ pub struct TokenPoolGroup {
     pub token_program_index: usize,
     pub mint_token_account_index: usize,
     pub pools: Vec<PoolData>,
+    pub is_3hop: bool,
+    pub token2_mint_index: Option<usize>,
+    pub token2_program_index: Option<usize>,
+    pub token2_mint_token_account_index: Option<usize>,
 }
 
 
@@ -164,4 +174,183 @@ pub fn get_pool_type(pool_program_id: Pubkey) -> Result<Option<PoolType>> {
     } else {
         Ok(None)
     }
+}
+
+
+/// 解析 remaining_accounts，构建 TokenPoolGroup 列表
+#[inline]
+pub fn parse_token_groups<'info>(remaining_accounts: &'info [AccountInfo<'info>]) -> Result<Vec<TokenPoolGroup>> {
+    let mut current_index = 0;
+    let mut token_groups = Vec::with_capacity(3);
+
+    while current_index + 3 < remaining_accounts.len() {
+        let token_mint_index = current_index;
+        let token_program_index = current_index + 1;
+        let mint_token_account_index = current_index + 2;
+
+        // 判断是否为3hop（通过占位的memo_program账户）
+        let is_3hop = if remaining_accounts[current_index + 3].key() == remaining_accounts[current_index + 2].key() { true } else { false };
+        let (token2_mint_index, token2_program_index, token2_mint_token_account_index) = if is_3hop {
+            (Some(current_index + 4), Some(current_index + 5), Some(current_index + 6))
+        } else {
+            (None, None, None)
+        };
+
+        let mut pools = Vec::with_capacity(6);
+        current_index += if is_3hop { 7 } else { 3 };
+
+        while current_index < remaining_accounts.len() {
+            let pool_program_id = &remaining_accounts[current_index];
+
+            match get_pool_type(pool_program_id.key()) {
+                Ok(pool_type) => match pool_type {
+                    Some(PoolType::CPMM) => {
+                        if current_index + CPMM_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::CPMM {
+                                program_id_index: current_index,
+                                authority_index: current_index + 1,
+                                config_index: current_index + 2,
+                                observation_state_index: current_index + 3,
+                                pool_index: current_index + 4,
+                                token0_vault_index: current_index + 5,
+                                token1_vault_index: current_index + 6,
+                            });
+                            current_index += CPMM_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::DLMM) => {
+                        if current_index + DLMM_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::DLMM {
+                                program_id_index: current_index,
+                                event_authority_index: current_index + 1,
+                                oracle_index: current_index + 2,
+                                pool_index: current_index + 3,
+                                reserve_x_index: current_index + 4,
+                                reserve_y_index: current_index + 5,
+                                bin_array_minus_1_index: current_index + 6,
+                                bin_array_0_index: current_index + 7,
+                                bin_array_1_index: current_index + 8,
+                            });
+                            current_index += DLMM_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::DAMMV2) => {
+                        if current_index + DAMMV2_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::DAMMV2 {
+                                program_id_index: current_index,
+                                event_authority_index: current_index + 1,
+                                pool_authority_index: current_index + 2,
+                                pool_index: current_index + 3,
+                                token_a_vault_index: current_index + 4,
+                                token_b_vault_index: current_index + 5,
+                            });
+                            current_index += DAMMV2_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::PUMP) => {
+                        if current_index + PUMP_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::PUMP {
+                                program_id_index: current_index,
+                                pool_index: current_index + 1,
+                                global_config_index: current_index + 2,
+                                event_authority_index: current_index + 3,
+                                coin_creator_vault_ata_index: current_index + 4,
+                                coin_creator_vault_authority_index: current_index + 5,
+                                pump_fee_wallet_index: current_index + 6,
+                                pump_fee_wallet_ata_index: current_index + 7,
+                                global_vol_accumulator_index: current_index + 8,
+                                user_vol_accumulator_index: current_index + 9,
+                                system_program_index: current_index + 10,
+                                associated_token_program_index: current_index + 11,
+                                base_vault_index: current_index + 12,
+                                quote_vault_index: current_index + 13,
+                                fee_config_index: current_index + 14,
+                                fee_program_index: current_index + 15,
+                            });
+                            current_index += PUMP_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::RAYDIUM) => {
+                        if current_index + RAYDIUM_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::RAYDIUM {
+                                program_id_index: current_index,
+                                event_authority_index: current_index + 1,
+                                pool_index: current_index + 2,
+                                base_vault_index: current_index + 3,
+                                quote_vault_index: current_index + 4,
+                            });
+                            current_index += RAYDIUM_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::CLMM) => {
+                        if current_index + CLMM_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::CLMM {
+                                program_id_index: current_index,
+                                pool_index: current_index + 1,
+                                amm_config_index: current_index + 2,
+                                observation_key_index: current_index + 3,
+                                bitmap_extension_index: current_index + 4,
+                                token_vault_0_index: current_index + 5,
+                                token_vault_1_index: current_index + 6,
+                                tick_array_minus_1_index: current_index + 7,
+                                tick_array_0_index: current_index + 8,
+                                tick_array_1_index: current_index + 9,
+                            });
+                            current_index += CLMM_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(PoolType::WHIRLPOOL) => {
+                        if current_index + WHIRLPOOL_ACCOUNT_COUNT <= remaining_accounts.len() {
+                            pools.push(PoolData::WHIRLPOOL {
+                                program_id_index: current_index,
+                                pool_index: current_index + 1,
+                                oracle_index: current_index + 2,
+                                vault_a_index: current_index + 3,
+                                vault_b_index: current_index + 4,
+                                tick_array_0_index: current_index + 5,
+                                tick_array_1_index: current_index + 6,
+                                tick_array_2_index: current_index + 7,
+                            });
+                            current_index += WHIRLPOOL_ACCOUNT_COUNT;
+                        } else {
+                            break;
+                        }
+                    }
+                    None => {
+                        break;
+                    }
+                },
+                Err(_) => {
+                    break;
+                }
+            }
+        }
+
+        if !pools.is_empty() {
+            token_groups.push(TokenPoolGroup {
+                token_mint_index,
+                token_program_index,
+                mint_token_account_index,
+                pools,
+                is_3hop,
+                token2_mint_index,
+                token2_program_index,
+                token2_mint_token_account_index,
+            });
+        }
+    }
+
+    Ok(token_groups)
 }

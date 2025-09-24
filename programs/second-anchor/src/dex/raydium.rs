@@ -2,7 +2,7 @@ use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{ceil_div_u128, ONE};
 use crate::constant::BASE_BPS;
 use anchor_lang::prelude::*;
- 
+use crate::constant::WSOL_MINT;
 
  
 pub mod raydium_program_id {
@@ -19,8 +19,8 @@ pub struct RaydiumPoolState {
     pub base_vault_index: usize,
     pub quote_vault_index: usize,
 
-    pub base_mint: Pubkey,
-    pub quote_mint: Pubkey,
+    pub base_mint: [u8; 32],
+    pub quote_mint: [u8; 32],
 
     pub base_reserve: u64,
     pub quote_reserve: u64,
@@ -34,14 +34,14 @@ pub struct RaydiumPoolState {
     pub quote_need_take_pnl: u64,
 
     pub price: u128,
+
+    pub has_wsol_pool: bool,
 }
 
 
 
 pub fn parse_raydium_pool_data(
     pool_index: &usize,
-    wsol_mint: Pubkey,
-    token_mint: Pubkey,
     accounts: &[AccountInfo],
     pool_state: &mut RaydiumPoolState,
 ) -> Result<()> {
@@ -56,20 +56,13 @@ pub fn parse_raydium_pool_data(
 
     let pool_data = pool_account.data.borrow();
     
-    let base_mint = Pubkey::try_from(&pool_data[400..432]).unwrap();
-    let quote_mint = Pubkey::try_from(&pool_data[432..464]).unwrap();
-   
-    // 优雅地验证池子包含SOL和指定token的配对
-    let (_, other_mint) = if base_mint == wsol_mint {
-        (base_mint, quote_mint)
-    } else if quote_mint == wsol_mint {
-        (quote_mint, base_mint)
-    } else {
-        return Err(ErrorCode::InvalidTokenPair.into());
-    };
-
-    // 验证另一个token是我们期望的token
-    require!(other_mint == token_mint, ErrorCode::TokenMismatch);
+    let base_mint = &pool_data[400..432];
+    let quote_mint = &pool_data[432..464];
+    
+    pool_state.has_wsol_pool = base_mint == WSOL_MINT || quote_mint == WSOL_MINT;
+    pool_state.base_mint = base_mint.try_into().unwrap();
+    pool_state.quote_mint = quote_mint.try_into().unwrap();
+    
 
     let base_reserve = {
         let base_vault_data = &accounts[pool_state.base_vault_index].data.borrow();
@@ -91,9 +84,7 @@ pub fn parse_raydium_pool_data(
     
     drop(pool_data);
 
-
-    pool_state.base_mint = base_mint;
-    pool_state.quote_mint = quote_mint;
+     
     pool_state.base_reserve = base_reserve;
     pool_state.quote_reserve = quote_reserve;
     pool_state.swap_fee_numerator = swap_fee_numerator;
@@ -105,14 +96,20 @@ pub fn parse_raydium_pool_data(
 }
 
 
-pub fn calculate_raydium_price(pool_state: &mut RaydiumPoolState, wsol_mint: Pubkey) -> Result<()> {
+pub fn calculate_raydium_price(pool_state: &mut RaydiumPoolState) -> Result<()> {
     // 计算价格：根据mint的顺序确定价格方向
-    let price = if pool_state.base_mint == wsol_mint {
+    let price = if pool_state.has_wsol_pool {
 
-        u128::from(pool_state.base_reserve)
+        let (wsol_reserve, token_reserve) = if pool_state.base_mint == WSOL_MINT {
+            (pool_state.base_reserve, pool_state.quote_reserve)
+        } else {
+            (pool_state.quote_reserve, pool_state.base_reserve)
+        };
+
+        u128::from(wsol_reserve)
         .checked_mul(ONE)
         .unwrap()
-        .checked_div(u128::from(pool_state.quote_reserve))
+        .checked_div(u128::from(token_reserve))
         .unwrap()
     } else {
      
@@ -134,7 +131,6 @@ pub fn calculate_raydium_price(pool_state: &mut RaydiumPoolState, wsol_mint: Pub
 /// Raydium AMM quote计算 - WSOL输入，Token输出
 pub fn raydium_quote_exact_input_wsol(
     pool_state: &RaydiumPoolState,
-    wsol_mint: Pubkey,
     wsol_amount_in: u64,
 ) -> Result<u64> {
     if wsol_amount_in == 0 {
@@ -153,7 +149,7 @@ pub fn raydium_quote_exact_input_wsol(
     }
 
     // 根据mint确定输入输出的reserve
-    let (input_reserve, output_reserve) = if pool_state.base_mint == wsol_mint {
+    let (input_reserve, output_reserve) = if pool_state.base_mint == WSOL_MINT {
         // WSOL -> Token: base_reserve是WSOL，quote_reserve是Token
         (pool_state.base_reserve, pool_state.quote_reserve)
     } else {
@@ -162,7 +158,7 @@ pub fn raydium_quote_exact_input_wsol(
     };
 
     // 需要减去pending的PnL
-    let (adjusted_input_reserve, adjusted_output_reserve) = if pool_state.base_mint == wsol_mint {
+    let (adjusted_input_reserve, adjusted_output_reserve) = if pool_state.base_mint == WSOL_MINT {
         // WSOL -> Token: input是base, output是quote
         (
             input_reserve.checked_sub(pool_state.base_need_take_pnl).unwrap(),
@@ -193,7 +189,6 @@ pub fn raydium_quote_exact_input_wsol(
 /// Raydium AMM quote计算 - Token输入，WSOL输出
 pub fn raydium_quote_exact_input_token(
     pool_state: &RaydiumPoolState,
-    wsol_mint: Pubkey,
     token_amount_in: u64,
 ) -> Result<u64> {
     if token_amount_in == 0 {
@@ -209,7 +204,7 @@ pub fn raydium_quote_exact_input_token(
     let amount_in_after_fee = token_amount_in.checked_sub(swap_fee).unwrap();
 
     // 根据mint确定输入输出的reserve
-    let (input_reserve, output_reserve) = if pool_state.base_mint == wsol_mint {
+    let (input_reserve, output_reserve) = if pool_state.base_mint == WSOL_MINT {
         // Token -> WSOL: quote_reserve是Token，base_reserve是WSOL
         (pool_state.quote_reserve, pool_state.base_reserve)
     } else {
@@ -218,7 +213,7 @@ pub fn raydium_quote_exact_input_token(
     };
 
     // 需要减去pending的PnL
-    let (adjusted_input_reserve, adjusted_output_reserve) = if pool_state.base_mint == wsol_mint {
+    let (adjusted_input_reserve, adjusted_output_reserve) = if pool_state.base_mint == WSOL_MINT {
         // Token -> WSOL: input是quote, output是base
         (
             input_reserve.checked_sub(pool_state.quote_need_take_pnl).unwrap(),

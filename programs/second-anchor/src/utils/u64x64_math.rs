@@ -22,6 +22,7 @@ pub const ONE: u128 = 1u128 << SCALE_OFFSET;
 /// 常量定义 (复刻官方SDK dammv2)
 const BASIS_POINT_MAX: u64 = 10_000;
 
+#[inline]
 pub fn get_fee_in_period(
     cliff_fee_numerator: u64,
     reduction_factor: u64,
@@ -49,7 +50,7 @@ pub fn get_fee_in_period(
 }
 
 
-
+#[inline]
 pub fn pow(base: u128, exp: i32) -> Option<u128> {
     // If exponent is negative. We will invert the result later by 1 / base^exp.abs()
     let mut invert = exp.is_negative();
@@ -215,11 +216,13 @@ pub fn pow(base: u128, exp: i32) -> Option<u128> {
 
 
 /// 向上取整除法
+#[inline]
 pub fn ceil_div(a: u64, b: u64) -> u64 {
     a / b + ((a % b) != 0) as u64
 }
 
 /// 向上取整除法
+#[inline]
 pub fn ceil_div_u128(a: u128, b: u128) -> u128 {
     a / b + ((a % b) != 0) as u128
 }

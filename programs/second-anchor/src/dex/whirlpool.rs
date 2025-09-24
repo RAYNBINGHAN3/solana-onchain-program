@@ -9,6 +9,7 @@ use crate::utils::whirlpool_256_math::{
 use anchor_lang::prelude::*;
 use std::cmp::min;
 use bytemuck::{Pod, Zeroable};
+use crate::constant::WSOL_MINT;
 
 pub mod whirlpool_program_id {
     use super::*;
@@ -27,8 +28,8 @@ pub struct WhirlpoolPoolState {
     pub tick_array_1_index: usize,
     pub tick_array_2_index: usize,
 
-    pub token_mint_a: Pubkey,
-    pub token_mint_b: Pubkey,
+    pub token_mint_a: [u8; 32],
+    pub token_mint_b: [u8; 32],
 
     pub sqrt_price: u128,
     pub tick_spacing: u16,
@@ -37,6 +38,8 @@ pub struct WhirlpoolPoolState {
 
     pub trade_fee_rate: u64,
     pub price: u128,
+
+    pub has_wsol_pool: bool,
 }
 
 /// Whirlpool TickArray 类型枚举
@@ -227,7 +230,7 @@ impl<'a> WhirlpoolTickArrayRef<'a> {
         }
         
         // 🎯 按照官方SDK：使用DynamicTick::deserialize方法
-        let mut tick_data = &data[actual_offset..actual_offset + DynamicTick::INITIALIZED_LEN];
+        let  tick_data = &data[actual_offset..actual_offset + DynamicTick::INITIALIZED_LEN];
         
         // 模拟DynamicTick::deserialize的行为
         let variant = tick_data[0];
@@ -903,8 +906,6 @@ impl FeeRateManager {
 /// 解析 Whirlpool 池数据 - 与其他 DEX 风格统一
 pub fn parse_whirlpool_pool_data(
     pool_index: &usize,
-    wsol_mint: Pubkey,
-    token_mint: Pubkey,
     accounts: &[AccountInfo],
     pool_state: &mut WhirlpoolPoolState,
 ) -> Result<()> {
@@ -941,32 +942,24 @@ pub fn parse_whirlpool_pool_data(
     // protocolFeeOwedA: 85-93 (8字节)
     // protocolFeeOwedB: 93-101 (8字节)
     // tokenMintA: 101-133 (32字节)
-    let token_mint_a = Pubkey::try_from(&pool_data[101..133]).unwrap();
+    let token_mint_a = &pool_data[101..133];
     
     // tokenVaultA: 133-165 (32字节)
     // feeGrowthGlobalA: 165-181 (16字节)
     // tokenMintB: 181-213 (32字节)
-    let token_mint_b = Pubkey::try_from(&pool_data[181..213]).unwrap();
+    let token_mint_b = &pool_data[181..213];
     
     // tokenVaultB: 213-245 (32字节)
     // feeGrowthGlobalB: 245-261 (16字节)
     // rewardLastUpdatedTimestamp: 261-269 (8字节)
     // rewardInfos: 269-653 (384字节 = 3 * 128字节)
 
-    // 验证池子包含SOL和指定token的配对
-    let (_, other_mint) = if token_mint_a == wsol_mint {
-        (token_mint_a, token_mint_b)
-    } else if token_mint_b == wsol_mint {
-        (token_mint_b, token_mint_a)
-    } else {
-        return Err(ErrorCode::InvalidTokenPair.into());
-    };
-
-    require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-
+    pool_state.has_wsol_pool = token_mint_a == WSOL_MINT || token_mint_b == WSOL_MINT;
+    pool_state.token_mint_a = token_mint_a.try_into().unwrap();
+    pool_state.token_mint_b = token_mint_b.try_into().unwrap();
+    drop(pool_data);
     // 填充池状态
-    pool_state.token_mint_a = token_mint_a;
-    pool_state.token_mint_b = token_mint_b;
+   
     pool_state.sqrt_price = sqrt_price;
     pool_state.tick_spacing = tick_spacing;
     pool_state.tick_current_index = tick_current_index;
@@ -1127,7 +1120,7 @@ pub fn parse_whirlpool_oracle_adaptive_fee(oracle_info: &AccountInfo) -> Result<
 
 
 /// 计算 Whirlpool 价格 - 
-pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState, wsol_mint: Pubkey) -> Result<()> {
+pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState) -> Result<()> {
     if pool_state.liquidity == 0 {
         pool_state.price = 0;
         return Ok(());
@@ -1138,11 +1131,13 @@ pub fn calculate_whirlpool_price(pool_state: &mut WhirlpoolPoolState, wsol_mint:
     // sqrt_price^2 得到实际价格 (Q64格式) - 使用安全数学函数
     // price_q64 = price_q64.checked_mul(price_q64).unwrap().checked_shr(64).unwrap();
     price_q64 = safe_mul_shr_cast(price_q64, price_q64, 64, Rounding::Down);
-   
-    // 如果WSOL不是token0，需要取倒数
-    if pool_state.token_mint_b != wsol_mint {
-        // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
-        price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
+    
+    if pool_state.has_wsol_pool {
+        // 如果WSOL不是token0，需要取倒数
+        if pool_state.token_mint_b != WSOL_MINT {
+                // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
+                price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
+        }
         
     }
  
@@ -1448,7 +1443,6 @@ fn whirlpool_swap_internal<'a>(
 /// Whirlpool Quote函数 - WSOL输入，Token输出 - 完整实现
 pub fn whirlpool_quote_exact_input_wsol(
     pool_state: &WhirlpoolPoolState,
-    wsol_mint: Pubkey,
     wsol_amount_in: u64,
     token_mint_info: &AccountInfo,
     whirlpool_params: &Option<WhirlpoolParams>,
@@ -1466,7 +1460,7 @@ pub fn whirlpool_quote_exact_input_wsol(
 
 
     // 确定交易方向
-    let a_to_b = pool_state.token_mint_a == wsol_mint;
+    let a_to_b = pool_state.token_mint_a == WSOL_MINT;
     
     // 获取当前时间戳
     let clock = Clock::get()?;
@@ -1498,7 +1492,6 @@ pub fn whirlpool_quote_exact_input_wsol(
 /// Whirlpool Quote函数 - Token输入，WSOL输出 - 完整实现
 pub fn whirlpool_quote_exact_input_token(
     pool_state: &WhirlpoolPoolState,
-    wsol_mint: Pubkey,
     token_amount_in: u64,
     token_mint_info: &AccountInfo,
     whirlpool_params: &Option<WhirlpoolParams>,
@@ -1525,7 +1518,7 @@ pub fn whirlpool_quote_exact_input_token(
     }
 
     // 确定交易方向
-    let a_to_b = pool_state.token_mint_b == wsol_mint;
+    let a_to_b = pool_state.token_mint_b == WSOL_MINT;
     
     // 获取当前时间戳
     let clock = Clock::get()?;
@@ -1546,6 +1539,61 @@ pub fn whirlpool_quote_exact_input_token(
     let wsol_amount_out = if a_to_b { swap_result.amount_b } else { swap_result.amount_a };
 
     Ok(wsol_amount_out)
+}
+pub fn whirlpool_quote_exact_input_token_output_token(
+    pool_state: &WhirlpoolPoolState,
+    a_to_b: bool,
+    token_amount_in: u64,
+    token1_mint_info: &AccountInfo,
+    token2_mint_info: &AccountInfo,
+    whirlpool_params: &Option<WhirlpoolParams>,
+) -> Result<u64> {
+    if token_amount_in == 0 || pool_state.liquidity == 0 {
+        return Ok(0);
+    }
+
+    // 检查token 2022费用
+    let transfer_fee = get_transfer_fee(token1_mint_info, token_amount_in)?;
+    let actual_token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap_or(0),
+    };
+
+    if actual_token_amount_in == 0 {
+        return Ok(0);
+    }
+    
+    let params = whirlpool_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
+
+    if params.tick_arrays.is_empty() {
+        return Ok(0);
+    }
+ 
+    // 获取当前时间戳
+    let clock = Clock::get()?;
+    let timestamp = clock.unix_timestamp as u64;
+    
+  
+    // 执行完整的 swap 计算
+    let swap_result = whirlpool_swap_internal(
+        pool_state,
+        &params.tick_arrays,
+        actual_token_amount_in,
+        params.sqrt_price_limit,
+        a_to_b,
+        &params.oracle_info,
+        timestamp,
+    )?;
+    
+    let token2_amount_out = if a_to_b { swap_result.amount_b } else { swap_result.amount_a };
+     
+    let transfer_fee = get_transfer_fee(token2_mint_info, token2_amount_out as u64)?;
+    let token2_amount_out = match transfer_fee {
+        0 => token2_amount_out,
+        _ => token2_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+    
+    Ok(token2_amount_out)
 }
 
 
@@ -1893,7 +1941,7 @@ fn compute_swap_step(
     // 由于我们只支持 amount_specified_is_input = true，所以条件简化为 !is_max_swap
     let fee_amount = if !is_max_swap {
         // 非max swap时，手续费 = 剩余输入 - 实际输入
-        msg!("amount_remaining: {}, amount_in: {}", amount_remaining, amount_in);
+        // msg!("amount_remaining: {}, amount_in: {}", amount_remaining, amount_in);
         amount_remaining - amount_in
     } else {
         // max swap时，根据输入量反推手续费 - 向上舍入

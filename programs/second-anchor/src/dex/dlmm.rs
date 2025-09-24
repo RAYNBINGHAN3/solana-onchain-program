@@ -1,9 +1,11 @@
+use crate::comparison::MidPoolInfo;
+use crate::constant::WSOL_MINT;
 use crate::utils::errors::ErrorCode;
 use crate::utils::u128x128_math::{safe_mul_shr_cast, safe_shl_div_cast, Rounding};
 use crate::utils::u64x64_math::{pow, ONE, SCALE_OFFSET};
 use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
- 
+
 pub mod dlmm_program_id {
     use super::*;
     declare_id!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -25,13 +27,19 @@ pub struct DlmmPoolState {
     /// DLMM pool index
     pub pool_index: usize,
     /// Token X mint
-    pub token_x_mint: Pubkey,
+    pub token_x_mint: [u8; 32],
     /// Token Y mint  
-    pub token_y_mint: Pubkey,
+    pub token_y_mint: [u8; 32],
     /// 活跃bin ID
     pub active_id: i32,
     /// Bin步长
     pub bin_step: u16,
+
+    pub reserve_x_index: usize,
+    pub reserve_y_index: usize,
+    pub bin_array_minus_1_index: usize,
+    pub bin_array_0_index: usize,
+    pub bin_array_1_index: usize,
 
     // StaticParameters中的费率相关字段
     /// 基础费率因子
@@ -57,6 +65,8 @@ pub struct DlmmPoolState {
     pub volatility_reference: u32,
     /// 索引参考值
     pub index_reference: i32,
+
+    pub has_wsol_pool: bool,
 }
 
 /// 单个Bin的状态（简化版本，仅包含必要字段）
@@ -110,8 +120,6 @@ pub struct BinState {
 /// 解析DLMM池数据 (完整解析所有费率计算必需字段)
 pub fn parse_dlmm_pool_data(
     pool_index: &usize,
-    wsol_mint: Pubkey,
-    token_mint: Pubkey,
     accounts: &[AccountInfo],
     pool_state: &mut DlmmPoolState,
 ) -> Result<()> {
@@ -128,73 +136,41 @@ pub fn parse_dlmm_pool_data(
     // let base_offset = 8;
 
     // 解析StaticParameters (偏移量8开始，总共32字节)
-    let base_factor =
-        u16::from_le_bytes(pool_data[8..10].try_into().unwrap());
-    let variable_fee_control = u32::from_le_bytes(
-        pool_data[16..20]
-            .try_into()
-            .unwrap(),
-    );
-    let max_volatility_accumulator = u32::from_le_bytes(
-        pool_data[20..24]
-            .try_into()
-            .unwrap(),
-    );
+    let base_factor = u16::from_le_bytes(pool_data[8..10].try_into().unwrap());
+    let variable_fee_control = u32::from_le_bytes(pool_data[16..20].try_into().unwrap());
+    let max_volatility_accumulator = u32::from_le_bytes(pool_data[20..24].try_into().unwrap());
 
     let base_fee_power_factor = pool_data[34];
 
     // 解析VariableParameters (偏移量40开始，总共32字节)
     // let var_offset = 40; // 8 + 32 = 40
-    let volatility_accumulator =
-        u32::from_le_bytes(pool_data[40..44].try_into().unwrap());
+    let volatility_accumulator = u32::from_le_bytes(pool_data[40..44].try_into().unwrap());
 
-    let volatility_reference = u32::from_le_bytes(
-        pool_data[44..48]
-            .try_into()
-            .unwrap(),
-    );
-    let index_reference = i32::from_le_bytes(
-        pool_data[48..52]
-            .try_into()
-            .unwrap(),
-    );
+    let volatility_reference = u32::from_le_bytes(pool_data[44..48].try_into().unwrap());
+    let index_reference = i32::from_le_bytes(pool_data[48..52].try_into().unwrap());
     // 解析LbPair主体字段 (偏移量72开始)
     // let pair_offset = 72; // 40 + 32 = 72
 
-    let active_id = i32::from_le_bytes(
-        pool_data[76..80]
-            .try_into()
-            .unwrap(),
-    );
-    let bin_step = u16::from_le_bytes(
-        pool_data[80..82]
-            .try_into()
-            .unwrap(),
-    );
+    let active_id = i32::from_le_bytes(pool_data[76..80].try_into().unwrap());
+    let bin_step = u16::from_le_bytes(pool_data[80..82].try_into().unwrap());
 
     // tokenXMint在72 + 16 = 88字节处开始
-    let token_x_mint = Pubkey::try_from(&pool_data[88..120]).unwrap();
+    let token_x_mint = &pool_data[88..120];
     // tokenYMint在88 + 32 = 120字节处开始
-    let token_y_mint = Pubkey::try_from(&pool_data[120..152]).unwrap();
+    let token_y_mint = &pool_data[120..152];
 
-    // 验证池子包含SOL和指定token的配对
-    let (_, other_mint) = if token_x_mint == wsol_mint {
-        (token_x_mint, token_y_mint)
-    } else if token_y_mint == wsol_mint {
-        (token_y_mint, token_x_mint)
-    } else {
-        return Err(ErrorCode::InvalidTokenPair.into());
-    };
+    let has_wsol_pool = token_x_mint == WSOL_MINT || token_y_mint == WSOL_MINT;
+    pool_state.has_wsol_pool = has_wsol_pool;
 
-    require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-   
+    pool_state.token_x_mint = token_x_mint.try_into().unwrap();
+    pool_state.token_y_mint = token_y_mint.try_into().unwrap();
+
     drop(pool_data);
-    
+
     // reserve地址在token_y_mint之后
     // let reserve_x = Pubkey::try_from(&pool_data[pair_offset + 80..pair_offset + 112]).unwrap();
     // let reserve_y = Pubkey::try_from(&pool_data[pair_offset + 112..pair_offset + 144]).unwrap();
-    pool_state.token_x_mint = token_x_mint;
-    pool_state.token_y_mint = token_y_mint;
+
     pool_state.active_id = active_id;
     pool_state.bin_step = bin_step;
     pool_state.base_factor = base_factor;
@@ -209,39 +185,41 @@ pub fn parse_dlmm_pool_data(
 }
 
 /// 计算DLMM价格 (返回Q64.64格式)
-pub fn calculate_dlmm_price(pool: &DlmmPoolState, wsol_mint: Pubkey) -> Result<u128> {
-    // 计算bin_step的Q64.64表示: bin_step / 10000
-    let bps = u128::from(pool.bin_step)
-        .checked_shl(SCALE_OFFSET.into())
-        .unwrap()
-        .checked_div(10000u128)
-        .unwrap();
+// pub fn calculate_dlmm_price(pool: &DlmmPoolState) -> Result<u128> {
+//     // 计算bin_step的Q64.64表示: bin_step / 10000
+//     let bps = u128::from(pool.bin_step)
+//         .checked_shl(SCALE_OFFSET.into())
+//         .unwrap()
+//         .checked_div(10000u128)
+//         .unwrap();
 
-    // 计算(1 + bin_step)的Q64.64表示
-    let base = ONE.checked_add(bps).unwrap();
+//     // 计算(1 + bin_step)的Q64.64表示
+//     let base = ONE.checked_add(bps).unwrap();
 
-    // 计算(1 + bin_step)^active_id
-    let mut price_q64 = pow(base, pool.active_id).unwrap();
+//     // 计算(1 + bin_step)^active_id
+//     let mut price_q64 = pow(base, pool.active_id).unwrap();
 
-    // 如果WSOL不是TokenY，需要取倒数
-    // 在Q64.64格式中，倒数 = (2^64)^2 / price = 2^128 / price
-    if pool.token_y_mint != wsol_mint {
-        if price_q64 == 0 {
-            return Err(ErrorCode::ZeroPrice.into());
-        }
-        // Q64.64倒数计算
-        price_q64 = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
-            .checked_div(price_q64)
-            .unwrap();
-    }
+//     if pool.has_wsol_pool {
+//         if pool.token_y_mint != WSOL_MINT {
+//             if price_q64 == 0 {
+//                 return Err(ErrorCode::ZeroPrice.into());
+//             }
+//             // Q64.64倒数计算
+//             price_q64 = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
+//                 .checked_div(price_q64)
+//                 .unwrap();
+//         }
+//     }
+//     // 如果WSOL不是TokenY，需要取倒数
+//     // 在Q64.64格式中，倒数 = (2^64)^2 / price = 2^128 / price
 
-    // 转换为f64用于打印 (price / 2^64)
-    let price_f64 = price_q64 as f64 / ONE as f64;
-    msg!("DLMM价格: {:.8} SOL", price_f64);
+//     // 转换为f64用于打印 (price / 2^64)
+//     // let price_f64 = price_q64 as f64 / ONE as f64;
+//     // msg!("DLMM价格: {:.8} SOL", price_f64);
 
-    // 返回完整的Q64.64格式
-    Ok(price_q64)
-}
+//     // 返回完整的Q64.64格式
+//     Ok(price_q64)
+// }
 
 // // 快速计算DLMM价格 (用于价格比较阶段，不需要bin array数据)
 // // 只基于active bin价格，不考虑流动性分布
@@ -268,7 +246,7 @@ pub fn calculate_dlmm_price(pool: &DlmmPoolState, wsol_mint: Pubkey) -> Result<u
 /// 🚀 超高效价格读取 - 直接从bin array中读取active bin的价格
 /// 比计算价格节省大量CU，因为bin中的price字段已经是Q64.64格式
 pub fn get_dlmm_price_from_bin_array(
-    wsol_mint: Pubkey,
+    // wsol_mint: Pubkey,
     // accounts: &[AccountInfo],
     // bin_array_0_index: usize,
     pool_state: &mut DlmmPoolState,
@@ -286,14 +264,14 @@ pub fn get_dlmm_price_from_bin_array(
     if price_q64 == 0 {
         return Err(ErrorCode::ZeroPrice.into());
     }
-
-    // 如果WSOL不是TokenY，需要取倒数
-    if pool_state.token_y_mint != wsol_mint {
-        price_q64 = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
-            .checked_div(price_q64)
-            .unwrap();
+    if pool_state.has_wsol_pool {
+        // 如果WSOL不是TokenY，需要取倒数
+        if pool_state.token_y_mint != WSOL_MINT {
+            price_q64 = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
+                .checked_div(price_q64)
+                .unwrap();
+        }
     }
-
     pool_state.price = price_q64;
 
     Ok(())
@@ -494,15 +472,14 @@ pub fn compute_fee_from_amount(pool: &DlmmPoolState, amount_with_fees: u64, acti
 /// 使用预处理的有序bins
 pub fn dlmm_quote_exact_input_wsol_optimized(
     pool: &DlmmPoolState,
-    wsol_mint: Pubkey,
     wsol_amount_in: u64,
     ordered_bins: &[(i32, BinState)], // 已按交易方向排序的bins
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     // 确定交易方向：WSOL输入，Token输出
-    let swap_for_y = if pool.token_x_mint == wsol_mint {
+    let swap_for_y = if pool.token_x_mint == WSOL_MINT {
         true // WSOL是X输入，Token是Y输出，输出Y，所以swap_for_y=true
-    } else if pool.token_y_mint == wsol_mint {
+    } else if pool.token_y_mint == WSOL_MINT {
         false // WSOL是Y输入，Token是X输出，输出X，所以swap_for_y=false
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
@@ -528,15 +505,14 @@ pub fn dlmm_quote_exact_input_wsol_optimized(
 /// 🚀 DLMM超级优化Quote函数 - Token输入版本
 pub fn dlmm_quote_exact_input_token_optimized(
     pool_state: &DlmmPoolState,
-    wsol_mint: Pubkey,
     token_amount_in: u64,
     ordered_bins: &[(i32, BinState)], // 已按交易方向排序的bins
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
     // 确定交易方向：Token输入，WSOL输出
-    let swap_for_y = if pool_state.token_x_mint == wsol_mint {
+    let swap_for_y = if pool_state.token_x_mint == WSOL_MINT {
         false // Token是Y输入，WSOL是X输出，输出X，所以swap_for_y=false
-    } else if pool_state.token_y_mint == wsol_mint {
+    } else if pool_state.token_y_mint == WSOL_MINT {
         true // Token是X输入，WSOL是Y输出，输出Y，所以swap_for_y=true
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
@@ -558,6 +534,42 @@ pub fn dlmm_quote_exact_input_token_optimized(
     )?;
 
     Ok(wsol_amount_out)
+}
+
+/// 🚀 DLMM超级优化Quote函数 - Token输入版本
+pub fn dlmm_quote_exact_input_token_output_token(
+    pool_state: &DlmmPoolState,
+    swap_for_y: bool,
+    token_amount_in: u64,
+    ordered_bins: &[(i32, BinState)], // 已按交易方向排序的bins
+    token1_mint_info: &AccountInfo,
+    token2_mint_info: &AccountInfo,
+) -> Result<u64> {
+    
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token1_mint_info, token_amount_in)?;
+    let token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
+    };
+
+    // 🚀 使用超级优化的跨bin计算
+    let token2_amount_out = calculate_exact_output_across_bins_optimized(
+        pool_state,
+        token_amount_in,
+        swap_for_y, // 输入token，输出wsol
+        ordered_bins,
+    )?;
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token2_mint_info, token2_amount_out)?;
+    let token2_amount_out = match transfer_fee {
+        0 => token2_amount_out,
+        _ => token2_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+
+    Ok(token2_amount_out)
 }
 
 /// 🚀 超级优化版本：使用预处理的有序bins进行跨bin计算
@@ -593,7 +605,7 @@ fn calculate_exact_output_across_bins_optimized(
     Ok(total_amount_out)
 }
 
-/// 计算单个bin中的交换结果 
+/// 计算单个bin中的交换结果
 fn calculate_swap_in_bin(
     pool: &DlmmPoolState,
     amount_in: u64,
@@ -624,17 +636,16 @@ fn calculate_swap_in_bin(
 pub fn parse_dlmm_bin_arrays_optimized(
     pool: &DlmmPoolState,
     accounts: &[AccountInfo],
-    bin_array_minus_1_index: usize,
-    bin_array_0_index: usize,
-    bin_array_1_index: usize,
     active_id: i32,
     swap_for_y: bool,
     buy_pool_price: u128,  // 买入池价格 (Q64.64格式)
     sell_pool_price: u128, // 卖出池价格 (Q64.64格式)
-    wsol_mint: Pubkey,
     is_buy: bool,
+    mid_pool_state: Option<&MidPoolInfo>,
 ) -> Result<Vec<(i32, BinState)>> {
     let mut all_relevant_bins = Vec::with_capacity(30);
+
+    let has_mid_pool = mid_pool_state.is_some();
 
     // 🚀 关键优化：确定价格停止条件
     let price_limit = if is_buy {
@@ -649,13 +660,13 @@ pub fn parse_dlmm_bin_arrays_optimized(
 
     // 🚀 智能检测 active_id 实际在哪个 bin array 中
     let all_bin_array_indices = [
-        bin_array_minus_1_index,
-        bin_array_0_index,
-        bin_array_1_index,
+        pool.bin_array_minus_1_index,
+        pool.bin_array_0_index,
+        pool.bin_array_1_index,
     ];
     let mut active_array_found_index: Option<usize> = None;
 
-    let bin_array_account_0 = &accounts[bin_array_0_index];
+    let bin_array_account_0 = &accounts[pool.bin_array_0_index];
     if let Some(array_range) = get_bin_array_range(bin_array_account_0)? {
         if active_id >= array_range.0 && active_id <= array_range.1 {
             active_array_found_index = Some(1);
@@ -702,9 +713,8 @@ pub fn parse_dlmm_bin_arrays_optimized(
                 swap_for_y,
                 price_limit,
                 &mut all_relevant_bins,
-                wsol_mint,
+                has_mid_pool,
             )?;
- 
         }
     } else {
         msg!(
@@ -730,7 +740,7 @@ fn parse_bin_array_data_selective(
     swap_for_y: bool,
     price_limit: u128,
     all_relevant_bins: &mut Vec<(i32, BinState)>,
-    wsol_mint: Pubkey,
+    has_mid_pool: bool,
 ) -> Result<bool> {
     // 🛡️ 检查bin array是否已初始化
     if bin_array_account.owner != &dlmm_program_id::ID {
@@ -784,20 +794,30 @@ fn parse_bin_array_data_selective(
                 // let price_bytes = &data[bin_offset + 16..bin_offset + 32];
                 // let mut price = u128::from_le_bytes(price_bytes.try_into().unwrap());
                 // 🔥 关键修复：使用计算的价格而不是读取的价格
-                let mut price = calculate_bin_price(bin_id, pool.bin_step)?;
 
-                if pool.token_y_mint != wsol_mint {
-                    price = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
-                        .checked_div(price)
-                        .unwrap();
-                }
+                let price = calculate_bin_price(bin_id, pool.bin_step)?;
+                if !has_mid_pool {
+                    if pool.token_y_mint != WSOL_MINT {
+                        let inverted_price = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
+                            .checked_div(price)
+                            .unwrap();
 
-                // 价格小于限制 直接停止
-                if price < price_limit || all_relevant_bins.len() >= 30 {
-                    reached_limit = true;
-                    break;
+                        if inverted_price < price_limit {
+                            reached_limit = true;
+                            break;
+                        }
+                    }
+                    // 价格小于限制 直接停止
+                    if all_relevant_bins.len() >= 20 {
+                        reached_limit = true;
+                        break;
+                    }
+                } else {
+                    if all_relevant_bins.len() >= 10 {
+                        reached_limit = true;
+                        break;
+                    }
                 }
- 
 
                 let max_amount_in = get_max_amount_in(amount_y, amount_x, price, swap_for_y);
                 let max_fee = compute_fee(pool, max_amount_in, bin_id);
@@ -841,21 +861,29 @@ fn parse_bin_array_data_selective(
                 // msg!("找到X流动性bin: bin_id={}, amount_x={} active_id={}", bin_id, amount_x, active_id);
                 // let price_bytes = &data[bin_offset + 16..bin_offset + 32];
                 // let mut price = u128::from_le_bytes(price_bytes.try_into().unwrap());
-                // 🔥 关键修复：使用计算的价格而不是读取的价格
-                let mut price = calculate_bin_price(bin_id, pool.bin_step)?;
 
-                if pool.token_y_mint != wsol_mint {
-                    price = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
-                        .checked_div(price)
-                        .unwrap();
-                }
+                let price = calculate_bin_price(bin_id, pool.bin_step)?;
+                if !has_mid_pool {
+                    if pool.token_y_mint != WSOL_MINT {
+                        let inverted_price = (ONE.checked_shl(SCALE_OFFSET.into()).unwrap())
+                            .checked_div(price)
+                            .unwrap();
+                        if inverted_price >= price_limit {
+                            reached_limit = true;
+                            break;
+                        }
+                    }
 
-                // 价格大于限制 直接停止
-                if price > price_limit || all_relevant_bins.len() >= 30 {
-                    reached_limit = true;
-                    break;
+                    if all_relevant_bins.len() >= 20 {
+                        reached_limit = true;
+                        break;
+                    }
+                } else {
+                    if all_relevant_bins.len() >= 10 {
+                        reached_limit = true;
+                        break;
+                    }
                 }
- 
 
                 let max_amount_in = get_max_amount_in(amount_y, amount_x, price, swap_for_y);
                 let max_fee = compute_fee(pool, max_amount_in, bin_id);
@@ -929,9 +957,9 @@ fn get_amount_out(amount_in: u64, price: u128, swap_for_y: bool) -> u64 {
 /// 返回 (start_bin_id, end_bin_id)
 fn get_bin_array_range(bin_array_account: &AccountInfo) -> Result<Option<(i32, i32)>> {
     // 检查是否已初始化
-    if bin_array_account.owner != &dlmm_program_id::ID {
-        return Ok(None);
-    }
+    // if bin_array_account.owner != &dlmm_program_id::ID {
+    //     return Ok(None);
+    // }
 
     // let data = bin_array_account.data.borrow();
     // if data.len() < 16 {
@@ -955,4 +983,3 @@ fn get_bin_array_range(bin_array_account: &AccountInfo) -> Result<Option<(i32, i
 
     Ok(Some((start_bin_id, end_bin_id)))
 }
-

@@ -26,7 +26,3 @@ anyhow = "1.0.98"
 num-traits = "0.2.19"
 ruint = "1.15.0"
 
-raydium-cp-swap = { git = "https://github.com/raydium-io/raydium-cp-swap", features = [
-    "no-entrypoint",
-    "cpi",
-] }

@@ -12,7 +12,10 @@ pub const CLMM_ACCOUNT_COUNT: usize = 10; // program_id + pool + amm_config + ob
 pub const WHIRLPOOL_ACCOUNT_COUNT: usize = 8; // program_id + pool + oracle + vault_a + vault_b + tick_array_0 + tick_array_1 + tick_array_2
 
 
-
+pub const WSOL_MINT: [u8; 32] = [
+    6, 155, 136, 87, 254, 171, 129, 132, 251, 104, 127, 99, 70, 24, 192, 53,
+    218, 196, 57, 220, 26, 235, 59, 85, 9, 160, 87, 149, 45, 129, 81, 81
+];
 
 
 

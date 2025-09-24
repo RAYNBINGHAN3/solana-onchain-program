@@ -9,6 +9,7 @@ pub enum Rounding {
 }
 
 /// (x * y) / denominator
+#[inline]
 fn mul_div(x: u128, y: u128, denominator: u128, rounding: Rounding) -> Option<u128> {
     if denominator == 0 {
         return None;
@@ -46,6 +47,7 @@ fn shl_div(x: u128, y: u128, offset: u8, rounding: Rounding) -> Option<u128> {
 
  
 /// 计算 (a * b) >> 64，Q64.64乘法
+#[inline]
 pub fn q64_mul(a: u128, b: u128) -> u128 {
     mul_shr(a, b, SCALE_OFFSET, Rounding::Down).unwrap_or(0)
 }
@@ -53,11 +55,13 @@ pub fn q64_mul(a: u128, b: u128) -> u128 {
 
 
 /// 计算 (a << 64) / b，Q64.64除法
+#[inline]
 pub fn q64_div(a: u128, b: u128) -> u128 {
     shl_div(a, b, SCALE_OFFSET, Rounding::Down).unwrap_or(0)
 }
 
 /// 将基点转换为Q64.64格式
+#[inline]
 pub fn bps_to_q64(bps: u64) -> u128 {
     // bps / BASE_BPS 转换为Q64.64
     // 使用mul_div: (bps * 2^64) / BASE_BPS
@@ -86,6 +90,7 @@ pub fn safe_shl_div_cast(
     shl_div(x, y, offset, rounding).unwrap_or(0)
 }
 
+#[inline]
 pub fn safe_mul_div_cast(
     x: u128,
     y: u128,
@@ -98,6 +103,7 @@ pub fn safe_mul_div_cast(
 
 
 /// (x * y) / denominator 
+#[inline]
 pub fn mul_div_u256(x: U256, y: U256, denominator: U256, rounding: Rounding) -> Option<U256> {
     if denominator == U256::ZERO {
         return None;
@@ -125,6 +131,7 @@ pub fn mul_div_u256(x: U256, y: U256, denominator: U256, rounding: Rounding) -> 
 
 /// 计算u128的整数平方根，使用牛顿迭代法
 /// 返回最大的整数x使得x² ≤ n
+#[inline]
 pub fn integer_sqrt_u128(n: u128) -> u128 {
     if n == 0 {
         return 0;

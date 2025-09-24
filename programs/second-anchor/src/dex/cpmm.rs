@@ -3,6 +3,7 @@ use crate::utils::u64x64_math::{SCALE_OFFSET};
 // use crate::utils::u128x128_math::{safe_mul_div_cast, Rounding, integer_sqrt_u128};
 use anchor_lang::prelude::*;
 use crate::utils::utils::{get_transfer_fee};
+use crate::constant::WSOL_MINT;
  
 pub mod cpmm_program_id {
     use super::*;
@@ -31,9 +32,9 @@ pub struct CpmmPoolState {
     pub token1_reserve: u64,
 
     /// Token0 mint
-    pub token0_mint: Pubkey,
+    pub token0_mint: [u8; 32],
     /// Token1 mint
-    pub token1_mint: Pubkey,
+    pub token1_mint: [u8; 32],
     /// 交易费率 (1000000=100%)
     pub trade_fee_rate: u64,
     /// Creator费率 (1000000=100%)
@@ -53,15 +54,15 @@ pub struct CpmmPoolState {
     pub creator_fees_token_1: u64,
 
     //1000000=100%
-    pub total_fee_rate: u64
+    pub total_fee_rate: u64,
+
+    pub has_wsol_pool: bool,
 }
 
 /// 解析CPMM池数据 (根据IDL结构优化的解析函数)
 pub fn parse_cpmm_pool_data(
     pool_index: &usize,
     config_index: &usize,
-    wsol_mint: Pubkey,
-    token_mint: Pubkey,
     accounts: &[AccountInfo],
     pool_state: &mut CpmmPoolState,
 ) -> Result<()> {
@@ -81,20 +82,13 @@ pub fn parse_cpmm_pool_data(
     // let token0_vault_key = Pubkey::try_from(&pool_data[72..104]).unwrap();
     // let token1_vault_key = Pubkey::try_from(&pool_data[104..136]).unwrap();
     // 跳过lp_mint(32) = 128+32=160
-    let token0_mint = Pubkey::try_from(&pool_data[168..200]).unwrap();
-    let token1_mint = Pubkey::try_from(&pool_data[200..232]).unwrap();
+    // let token0_mint = Pubkey::try_from(&pool_data[168..200]).unwrap();
+    // let token1_mint = Pubkey::try_from(&pool_data[200..232]).unwrap();
+    let token0_mint = &pool_data[168..200];
+    let token1_mint = &pool_data[200..232];
 
     // 优雅地验证池子包含SOL和指定token的配对
-    let (_, other_mint) = if token0_mint == wsol_mint {
-        (token0_mint, token1_mint)
-    } else if token1_mint == wsol_mint {
-        (token1_mint, token0_mint)
-    } else {
-        return Err(ErrorCode::InvalidTokenPair.into());
-    };
-
-    // 验证另一个token是我们期望的token
-    require!(other_mint == token_mint, ErrorCode::TokenMismatch);
+    pool_state.has_wsol_pool = token0_mint == WSOL_MINT || token1_mint == WSOL_MINT;
 
     // 验证amm_config地址匹配
     let amm_config_key = Pubkey::try_from(&pool_data[8..40]).unwrap();
@@ -129,8 +123,8 @@ pub fn parse_cpmm_pool_data(
     
     
     pool_state.creator_fee_rate = creator_fee_rate;
-    pool_state.token0_mint = token0_mint;
-    pool_state.token1_mint = token1_mint;
+    pool_state.token0_mint = token0_mint.try_into().unwrap();
+    pool_state.token1_mint = token1_mint.try_into().unwrap();
 
     // 解析所有费用累计 (根据真实pool数据结构)
     pool_state.protocol_fees_token_0 = u64::from_le_bytes(pool_data[341..349].try_into().unwrap());
@@ -163,7 +157,7 @@ pub fn parse_cpmm_pool_data(
 /// 判断是否在输入时收取creator fee
 fn is_creator_fee_on_input(
     pool: &CpmmPoolState,
-    input_mint: Pubkey,
+    input_mint: [u8; 32],
 ) -> bool {
     if !pool.enable_creator_fee {
         return false;
@@ -195,47 +189,39 @@ pub fn vault_amount_without_fee(
 
 /// 计算CPMM价格 (返回Q64.64格式) - 使用扣除费用后的实际可用流动性
 pub fn calculate_cpmm_price(
-    wsol_mint: Pubkey,
     pool_state: &mut CpmmPoolState,
 ) -> Result<()> {
-    // // 从金库账户获取原始储备量
-    // let token0_vault_data = &accounts[*token0_vault_index].data.borrow();
-    // let token1_vault_data = &accounts[*token1_vault_index].data.borrow();
-
-    // // Token账户的amount字段在偏移量64处 (8字节)
-    // let token0_reserve_raw = u64::from_le_bytes(token0_vault_data[64..72].try_into().unwrap());
-    // let token1_reserve_raw = u64::from_le_bytes(token1_vault_data[64..72].try_into().unwrap());
-
-    // 🔥 关键修复：使用扣除费用后的实际可用流动性
+ 
     let (token0_reserve, token1_reserve) =
         vault_amount_without_fee(pool_state);
 
-    // 确定WSOL和Token的储备量
-    let (wsol_reserve, token_reserve) = if pool_state.token0_mint == wsol_mint {
-        (token0_reserve, token1_reserve)
-    } else {
-        (token1_reserve, token0_reserve)
-    };
+    if token0_reserve == 0 || token1_reserve == 0 {
+        return Err(ErrorCode::ZeroLiquidity.into());
+    }
+ 
+    let price_q64 = if pool_state.has_wsol_pool {
+         // 确定WSOL和Token的储备量
+        let (wsol_reserve, token_reserve) = if pool_state.token0_mint == WSOL_MINT {
+            (token0_reserve, token1_reserve)
+        } else {
+            (token1_reserve, token0_reserve)
+        };
 
-    require!(
-        wsol_reserve > 0 && token_reserve > 0,
-        ErrorCode::ZeroLiquidity
-    );
-
-    // 简化价格计算: WSOL储备 / Token储备 * 小数位调整 (保留这个注释 不要删除)
-    // let price = (wsol_reserve as f64 / token_reserve as f64) * 10f64.powi(*token_decimals as i32 - SOL_DECIMALS as i32);
-
-    // Q64.64价格计算: (wsol_reserve << 64) / token_reserve
-    // 这给出了每个token值多少WSOL的Q64.64表示
-    let price_q64 = u128::from(wsol_reserve)
+        u128::from(wsol_reserve)
         .checked_shl(SCALE_OFFSET.into())
         .unwrap()
         .checked_div(token_reserve as u128)
-        .unwrap();
-
+        .unwrap()
+    }else{
+        u128::from(token1_reserve)
+        .checked_shl(SCALE_OFFSET.into())
+        .unwrap()
+        .checked_div(token0_reserve as u128)
+        .unwrap()
+    };
+   
     pool_state.price = price_q64;
 
-    // 返回完整的Q64.64格式
     Ok(())
 }
 
@@ -243,41 +229,30 @@ pub fn calculate_cpmm_price(
 /// 🔥 修复版本：与Raydium官方算法完全一致
 pub fn cpmm_quote_exact_input_wsol(
     pool: &CpmmPoolState,
-    wsol_mint: Pubkey,
     wsol_amount_in: u64,
     mint_token_info: &AccountInfo,
 ) -> Result<u64> {
     
-    // // 读取原始vault余额
-    // let token0_vault_data = token0_vault.data.borrow();
-    // let token1_vault_data = token1_vault.data.borrow();
-
-    // let token0_reserve_raw = u64::from_le_bytes(token0_vault_data[64..72].try_into().unwrap());
-    // let token1_reserve_raw = u64::from_le_bytes(token1_vault_data[64..72].try_into().unwrap());
 
     // 🔥 关键修复：使用扣除费用后的实际可用流动性
     let (token0_reserve, token1_reserve) =
         vault_amount_without_fee(pool);
 
     // 确定WSOL和Token的储备量和方向
-    let (wsol_reserve, token_reserve) = if pool.token0_mint == wsol_mint {
+    let (wsol_reserve, token_reserve) = if pool.token0_mint == WSOL_MINT {
         (token0_reserve, token1_reserve)
-    } else if pool.token1_mint == wsol_mint {
+    } else if pool.token1_mint == WSOL_MINT {
         (token1_reserve, token0_reserve)
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
     };
-
-    require!(
-        wsol_reserve > 0 && token_reserve > 0,
-        ErrorCode::ZeroLiquidity
-    );
+ 
 
     // 步骤1: 计算费用
     let trade_fee = (u128::from(wsol_amount_in) * u128::from(pool.trade_fee_rate) + 999999) / 1000000;
     
     // 判断creator fee是否在输入时收取
-    let is_creator_fee_on_input = is_creator_fee_on_input(pool, wsol_mint);
+    let is_creator_fee_on_input = is_creator_fee_on_input(pool, WSOL_MINT);
     
     let mut token_amount_out = if is_creator_fee_on_input {
         // 在输入时收取creator fee
@@ -325,9 +300,8 @@ pub fn cpmm_quote_exact_input_wsol(
 
 /// CPMM池精确输入报价计算 (Token输入) - 使用扣除费用后的实际可用流动性
 /// 🔥 修复版本：与Raydium官方算法完全一致
-pub fn cpmm_quote_exact_input_token(
+pub fn cpmm_quote_exact_input_token_output_wsol(
     pool: &CpmmPoolState,
-    wsol_mint: Pubkey,
     token_amount_in: u64,
     mint_token_info: &AccountInfo,
 ) -> Result<u64> {
@@ -338,29 +312,25 @@ pub fn cpmm_quote_exact_input_token(
         _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
     };
 
-    // 🔥 关键修复：使用扣除费用后的实际可用流动性
+  
     let (token0_reserve, token1_reserve) =
         vault_amount_without_fee(pool);
 
     // 确定Token和WSOL的储备量和方向
-    let (token_reserve, wsol_reserve) = if pool.token0_mint == wsol_mint {
+    let (token_reserve, wsol_reserve) = if pool.token0_mint == WSOL_MINT {
         (token1_reserve, token0_reserve) // Token是token1，WSOL是token0
-    } else if pool.token1_mint == wsol_mint {
+    } else if pool.token1_mint == WSOL_MINT {
         (token0_reserve, token1_reserve) // Token是token0，WSOL是token1
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
     };
-
-    require!(
-        token_reserve > 0 && wsol_reserve > 0,
-        ErrorCode::ZeroLiquidity
-    );
+ 
 
     // 步骤1: 计算费用
     let trade_fee = (u128::from(token_amount_in) * u128::from(pool.trade_fee_rate) + 999999) / 1000000;
     
     // 获取Token mint (非WSOL的那个)
-    let token_mint = if pool.token0_mint == wsol_mint {
+    let token_mint = if pool.token0_mint == WSOL_MINT {
         pool.token1_mint
     } else {
         pool.token0_mint
@@ -408,6 +378,87 @@ pub fn cpmm_quote_exact_input_token(
 }
 
 
+
+/// CPMM池精确输入报价计算 (Token输入) - 使用扣除费用后的实际可用流动性
+/// 🔥 修复版本：与Raydium官方算法完全一致
+pub fn cpmm_quote_exact_input_token_output_token(
+    pool: &CpmmPoolState,
+    token_amount_in: u64,
+    token1_mint_info: &AccountInfo,
+    token2_mint_info: &AccountInfo,
+) -> Result<u64> {
+
+    let transfer_fee = get_transfer_fee(token1_mint_info, token_amount_in)?;
+    let token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
+    };
+
+    // 🔥 关键修复：使用扣除费用后的实际可用流动性
+    let (token0_reserve, token1_reserve) =
+        vault_amount_without_fee(pool);
+
+    // 确定Token和WSOL的储备量和方向
+    let token1_mint = token1_mint_info.key().to_bytes(); // token1 mint是input token
+    let (token_in_reserve, token_out_reserve) = if pool.token0_mint == token1_mint {
+        (token0_reserve, token1_reserve) 
+    } else{
+        (token1_reserve, token0_reserve) 
+    };
+
+
+    // 步骤1: 计算费用
+    let trade_fee = (u128::from(token_amount_in) * u128::from(pool.trade_fee_rate) + 999999) / 1000000;
+    
+   
+    
+    // 判断creator fee是否在输入时收取
+    let is_creator_fee_on_input = is_creator_fee_on_input(pool, token1_mint);
+    
+    let mut token2_amount_out = if is_creator_fee_on_input {
+        // 在输入时收取creator fee
+        let creator_fee = (u128::from(token_amount_in) * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        let token_amount_after_fee = u128::from(token_amount_in)
+            .checked_sub(trade_fee)
+            .unwrap()
+            .checked_sub(creator_fee)
+            .unwrap();
+
+        // 计算输出
+        let numerator = token_amount_after_fee.checked_mul(token_out_reserve as u128).unwrap();
+        let denominator = u128::from(token_in_reserve).checked_add(token_amount_after_fee).unwrap();
+        let token2_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        token2_amount_out
+    } else {
+        // 只扣除trade fee
+        let token_amount_after_fee = u128::from(token_amount_in).checked_sub(trade_fee).unwrap();
+        
+        // 计算输出
+        let numerator = token_amount_after_fee.checked_mul(token_out_reserve as u128).unwrap();
+        let denominator = u128::from(token_in_reserve).checked_add(token_amount_after_fee).unwrap();
+        let token2_amount_out = numerator.checked_div(denominator).unwrap();
+        
+        token2_amount_out
+    };
+    
+    // 步骤2: 如果creator fee不在输入收取，则在输出收取
+    if !is_creator_fee_on_input && pool.enable_creator_fee {
+        let creator_fee = (token2_amount_out * u128::from(pool.creator_fee_rate) + 999999) / 1000000;
+        token2_amount_out = token2_amount_out.checked_sub(creator_fee).unwrap();
+    }
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token2_mint_info, token2_amount_out as u64)?;
+    token2_amount_out = match transfer_fee {
+        0 => token2_amount_out,
+        _ => token2_amount_out.checked_sub(transfer_fee as u128).unwrap(),
+    };
+
+
+
+    Ok(token2_amount_out as u64)
+}
 
 
 

@@ -2,8 +2,9 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
 use crate::dex::dammv2::Dammv2PoolState;
+use crate::optimalamt::OptimizationResult;
 use crate::ComparePrices;
- 
+use crate::constant::WSOL_MINT;
 
 pub fn execute_dammv2_swap<'info>(
     pool_state: &Dammv2PoolState,
@@ -13,7 +14,6 @@ pub fn execute_dammv2_swap<'info>(
     trade_amount: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
-    wsol_mint: Pubkey,
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
 
@@ -22,7 +22,7 @@ pub fn execute_dammv2_swap<'info>(
 
     // // 确定token a和b的mint和program (保持不变，因为DAMM_V2的a/b是固定的)
     let (token_a_mint, token_b_mint, token_a_program, token_b_program) =
-        if pool_state.token_a_mint == wsol_mint {
+        if pool_state.token_a_mint == WSOL_MINT {
             (
                 ctx.accounts.wsol_mint.to_account_info(),
                 accounts[token_mint_index].to_account_info(),
@@ -103,6 +103,71 @@ pub fn execute_dammv2_swap<'info>(
         ctx.accounts.payer.to_account_info(),
         token_a_program,
         token_b_program,
+        accounts[pool_state.program_id_index].to_account_info(),
+        accounts[pool_state.event_authority_index].to_account_info(),
+        accounts[pool_state.program_id_index].to_account_info(),
+    ];
+
+    // 执行CPI调用
+    invoke(&swap_instruction, account_infos).map_err(|e| e.into())
+}
+
+
+pub fn execute_dammv2_mid_swap<'info>(
+    pool_state: &Dammv2PoolState,
+    optimization_result: &OptimizationResult,
+    trade_amount: u64,
+    accounts: &[AccountInfo<'info>],
+    ctx: &Context<ComparePrices<'info>>,
+) -> Result<()> {
+ 
+
+    // 构建账户列表
+    let account_metas: [AccountMeta; 14] = [
+        AccountMeta::new_readonly(accounts[pool_state.pool_authority_index].key(), false),
+        AccountMeta::new(accounts[pool_state.pool_index].key(), false),
+        AccountMeta::new(accounts[optimization_result.token1_account_index].key(), false),
+        AccountMeta::new(accounts[optimization_result.token2_account_index.unwrap()].key(), false),
+        AccountMeta::new(accounts[pool_state.token_a_vault_index].key(), false),
+        AccountMeta::new(accounts[pool_state.token_b_vault_index].key(), false),
+        AccountMeta::new_readonly(accounts[optimization_result.token1_mint_index].key(), false),
+        AccountMeta::new_readonly(accounts[optimization_result.token2_mint_index.unwrap()].key(), false),
+        AccountMeta::new_readonly(ctx.accounts.payer.key(), true),
+        AccountMeta::new_readonly(accounts[optimization_result.token1_program_index].key(), false),
+        AccountMeta::new_readonly(accounts[optimization_result.token2_program_index.unwrap()].key(), false),
+        AccountMeta::new_readonly(accounts[pool_state.program_id_index].key(), false), //referral_token_account
+        AccountMeta::new_readonly(accounts[pool_state.event_authority_index].key(), false),
+        AccountMeta::new_readonly(accounts[pool_state.program_id_index].key(), false),
+    ];
+
+
+    // 🚀 优化: 高效构建指令数据 (预分配容量，避免序列化)
+    let mut instruction_data = Vec::with_capacity(24); // 8字节discriminator + 8字节amount_in + 8字节minimum_amount_out
+    instruction_data.extend_from_slice(&[248, 198, 158, 145, 225, 117, 135, 200]); // swap指令discriminator
+    instruction_data.extend_from_slice(&trade_amount.to_le_bytes());
+    instruction_data.extend_from_slice(&0u64.to_le_bytes()); // minimum_amount_out
+
+
+    // 构建指令
+    let swap_instruction = Instruction {
+        program_id: accounts[pool_state.program_id_index].key(),
+        accounts: account_metas.into(),
+        data: instruction_data,
+    };
+
+    // 🚀 优化: 直接构建切片，避免Vec的堆分配
+    let account_infos = &[
+        accounts[pool_state.pool_authority_index].to_account_info(),
+        accounts[pool_state.pool_index].to_account_info(),
+        accounts[optimization_result.token1_account_index].to_account_info(),
+        accounts[optimization_result.token2_account_index.unwrap()].to_account_info(),
+        accounts[pool_state.token_a_vault_index].to_account_info(),
+        accounts[pool_state.token_b_vault_index].to_account_info(),
+        accounts[optimization_result.token1_mint_index].to_account_info(),
+        accounts[optimization_result.token2_mint_index.unwrap()].to_account_info(),
+        ctx.accounts.payer.to_account_info(),
+        accounts[optimization_result.token1_program_index].to_account_info(),
+        accounts[optimization_result.token2_program_index.unwrap()].to_account_info(),
         accounts[pool_state.program_id_index].to_account_info(),
         accounts[pool_state.event_authority_index].to_account_info(),
         accounts[pool_state.program_id_index].to_account_info(),

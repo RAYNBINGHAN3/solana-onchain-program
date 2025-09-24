@@ -2,6 +2,7 @@ use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{ceil_div, ceil_div_u128, SCALE_OFFSET};
 use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
+use crate::constant::WSOL_MINT;
 
 // // Pump程序ID
 // pub const PUMP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -38,8 +39,8 @@ pub struct PumpPoolState {
     pub base_vault_index: usize,
     pub quote_vault_index: usize,
 
-    pub base_mint: Pubkey,
-    pub quote_mint: Pubkey,
+    pub base_mint: [u8; 32],
+    pub quote_mint: [u8; 32],
 
     pub trade_fee_rate: u64,
     pub price: u128,
@@ -57,15 +58,17 @@ pub struct PumpPoolState {
     // 用于动态费率计算
     pub creator: Pubkey,        // 池子创建者 (用于isPumpPool判断)
     pub coin_creator: Pubkey,   // 代币创建者 (用于费用计算)
+
+
+    pub has_wsol_pool: bool,
 }
 
 /// 解析 Pump 池数据
 /// 🚀 优化版：使用直接字节偏移解析 Pump 池数据，节省 CU
 pub fn parse_pump_pool_data(
     pool_index: &usize,
-    _wsol_mint: Pubkey,
-    token_mint_index: usize,
     accounts: &[AccountInfo],
+    token_mint_index: &usize,
     pool_state: &mut PumpPoolState,
 ) -> Result<()> {
     let pool_account = &accounts[*pool_index];
@@ -78,8 +81,12 @@ pub fn parse_pump_pool_data(
         return Err(ErrorCode::InvalidAccount.into());
     }
 
-    pool_state.base_mint = Pubkey::try_from(&pool_data[43..75]).unwrap();
-    pool_state.quote_mint = Pubkey::try_from(&pool_data[75..107]).unwrap();
+    let base_mint = &pool_data[43..75];
+    let quote_mint = &pool_data[75..107];
+
+    pool_state.has_wsol_pool = base_mint == WSOL_MINT || quote_mint == WSOL_MINT;
+    pool_state.base_mint = base_mint.try_into().unwrap();
+    pool_state.quote_mint = quote_mint.try_into().unwrap();
 
     // 解析 creator (池子创建者) 和 coin_creator (代币创建者)
     pool_state.creator = Pubkey::try_from(&pool_data[11..43]).unwrap();      // creator字段
@@ -110,7 +117,7 @@ pub fn parse_pump_pool_data(
     let fee_config_account = &accounts[pool_state.fee_config_index];
     
     let supply = {
-        let mint = accounts[token_mint_index].data.borrow();
+        let mint = accounts[*token_mint_index].data.borrow();
         u64::from_le_bytes(mint[36..44].try_into().unwrap())
     };
     // msg!("supply: {} mint: {}", supply, accounts[token_mint_index].key);
@@ -118,7 +125,7 @@ pub fn parse_pump_pool_data(
     // 使用动态费率计算 - 在作用域内借用fee_config_data
     let (lp_fee, protocol_fee, creator_fee) = {
         let fee_config_data = fee_config_account.data.borrow();
-        compute_dynamic_fees(pool_state, supply, accounts[token_mint_index].key, &fee_config_data)?
+        compute_dynamic_fees(pool_state, supply, accounts[*token_mint_index].key, &fee_config_data)?
     };
 
     pool_state.lp_fee_basis_points = lp_fee;
@@ -297,30 +304,35 @@ fn calculate_fee_tier(fee_tiers: &[FeeTier], market_cap: u64) -> (u64, u64, u64)
 }
 
 /// 计算 Pump 池价格
-pub fn calculate_pump_price(pool_state: &mut PumpPoolState, wsol_mint: Pubkey) -> Result<()> {
+pub fn calculate_pump_price(pool_state: &mut PumpPoolState) -> Result<()> {
     if pool_state.base_reserve == 0 || pool_state.quote_reserve == 0 {
         pool_state.price = 0;
         return Ok(());
     }
 
-    // 确定WSOL和Token的储备量
-    let (wsol_reserve, token_reserve) = if pool_state.quote_mint == wsol_mint {
-        (pool_state.quote_reserve, pool_state.base_reserve)
-    } else {
-        (pool_state.base_reserve, pool_state.quote_reserve)
+    let price_q64 = if pool_state.has_wsol_pool {
+        // 确定WSOL和Token的储备量
+        let (wsol_reserve, token_reserve) = if pool_state.quote_mint == WSOL_MINT {
+            (pool_state.quote_reserve, pool_state.base_reserve)
+        } else {
+            (pool_state.base_reserve, pool_state.quote_reserve)
+        };
+
+        u128::from(wsol_reserve)
+            .checked_shl(SCALE_OFFSET.into())
+            .unwrap()
+            .checked_div(token_reserve as u128)
+            .unwrap()
+    }else{
+        u128::from(pool_state.quote_reserve)
+            .checked_shl(SCALE_OFFSET.into())
+            .unwrap()
+            .checked_div(pool_state.base_reserve as u128)
+            .unwrap()
     };
 
-    let price_q64 = u128::from(wsol_reserve)
-        .checked_shl(SCALE_OFFSET.into())
-        .unwrap()
-        .checked_div(token_reserve as u128)
-        .unwrap();
-
     pool_state.price = price_q64;
-
-    // msg!("Pump price: {} SOL", pool_state.price as f64 / ONE as f64);
-
-    // 计算总手续费率 (basis points)
+ 
     pool_state.trade_fee_rate = pool_state.lp_fee_basis_points + pool_state.protocol_fee_basis_points;
 
     pool_state.trade_fee_rate +=  get_coin_creator_fee_basis_points(pool_state);
@@ -435,7 +447,6 @@ pub fn pump_sell_base_input_internal(pool_state: &PumpPoolState, base_amount: u6
 /// 便捷函数：根据 WSOL 方向自动选择正确的函数
 pub fn pump_quote_exact_input_wsol(
     pool_state: &PumpPoolState,
-    wsol_mint: Pubkey,
     wsol_amount: u64,
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
@@ -443,10 +454,10 @@ pub fn pump_quote_exact_input_wsol(
         return Ok(0);
     }
 
-    let mut token_amount_out = if pool_state.quote_mint == wsol_mint {
+    let mut token_amount_out = if pool_state.quote_mint == WSOL_MINT {
         // WSOL 是 quote，所以这是 buy quote input
         pump_buy_quote_input_internal(pool_state, wsol_amount)?
-    } else if pool_state.base_mint == wsol_mint {
+    } else if pool_state.base_mint == WSOL_MINT {
         // WSOL 是 base，所以这是 sell base input
         pump_sell_base_input_internal(pool_state, wsol_amount)?
     } else {
@@ -465,7 +476,6 @@ pub fn pump_quote_exact_input_wsol(
 /// 便捷函数：根据 Token 方向自动选择正确的函数
 pub fn pump_quote_exact_input_token(
     pool_state: &PumpPoolState,
-    wsol_mint: Pubkey,
     token_amount: u64,
     token_mint_info: &AccountInfo,
 ) -> Result<u64> {
@@ -480,13 +490,51 @@ pub fn pump_quote_exact_input_token(
         _ => token_amount.checked_sub(transfer_fee).unwrap(),
     };
 
-    if pool_state.base_mint != wsol_mint {
+    if pool_state.base_mint != WSOL_MINT {
         // Token 是 base，所以这是 sell base input
         pump_sell_base_input_internal(pool_state, token_amount)
-    } else if pool_state.quote_mint == wsol_mint {
+    } else if pool_state.quote_mint == WSOL_MINT {
         // Token 是 quote，所以这是 buy quote input
         pump_buy_quote_input_internal(pool_state, token_amount)
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
     }
+}
+
+/// 便捷函数：根据 Token 方向自动选择正确的函数
+pub fn pump_quote_exact_input_token_output_token(
+    pool_state: &PumpPoolState,
+    is_base_to_quote: bool,
+    token_amount: u64,
+    token1_mint_info: &AccountInfo,
+    token2_mint_info: &AccountInfo,
+) -> Result<u64> {
+    if token_amount == 0 {
+        return Ok(0);
+    }
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token1_mint_info, token_amount)?;
+    let token_amount = match transfer_fee {
+        0 => token_amount,
+        _ => token_amount.checked_sub(transfer_fee).unwrap(),
+    };
+
+    let mut token2_amount_out = if is_base_to_quote {
+        // Token 是 base，所以这是 sell base input
+        pump_sell_base_input_internal(pool_state, token_amount)?  
+    } else {
+        // Token 是 quote，所以这是 buy quote input
+        pump_buy_quote_input_internal(pool_state, token_amount)?
+    };
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token2_mint_info, token2_amount_out as u64)?;
+    token2_amount_out = match transfer_fee {
+        0 => token2_amount_out,
+        _ => token2_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+
+    Ok(token2_amount_out)
+    
 }

@@ -3,6 +3,8 @@ use crate::ComparePrices;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
+use crate::constant::WSOL_MINT;
+use crate::optimalamt::OptimizationResult;
 
 /// 执行 Whirlpool 交换
 pub fn execute_whirlpool_swap<'info>(
@@ -15,7 +17,7 @@ pub fn execute_whirlpool_swap<'info>(
     ctx: &Context<ComparePrices<'info>>,
     is_buy: bool, // true: WSOL->Token, false: Token->WSOL
 ) -> Result<()> {
-    let wsol_mint = ctx.accounts.wsol_mint.key();
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
     let program_id = accounts[pool_state.program_id_index].key();
 
     // 确定交换方向和账户
@@ -29,7 +31,7 @@ pub fn execute_whirlpool_swap<'info>(
         a_to_b,
     ) = if is_buy {
         // 买入：WSOL -> Token
-        if pool_state.token_mint_a == wsol_mint {
+        if pool_state.token_mint_a == WSOL_MINT {
             (
                 ctx.accounts.token_program.to_account_info(),
                 accounts[token_mint_program_index].to_account_info(),
@@ -54,7 +56,7 @@ pub fn execute_whirlpool_swap<'info>(
         }
     } else {
         // 卖出：Token -> WSOL
-        if pool_state.token_mint_a == wsol_mint {
+        if pool_state.token_mint_a == WSOL_MINT {
             (
                 ctx.accounts.token_program.to_account_info(),
                 accounts[token_mint_program_index].to_account_info(),
@@ -87,6 +89,90 @@ pub fn execute_whirlpool_swap<'info>(
 
     // let valid_tick_arrays = get_valid_tick_arrays(accounts, &tick_array_indices, program_id);
    
+    // 构建 CPI 指令
+    let swap_instruction = build_whirlpool_swap_instruction(
+        program_id,
+        pool_state,
+        &ctx.accounts.payer.key(),
+        token_program_a.key(),
+        token_program_b.key(),
+        token_account_a.key(),
+        token_account_b.key(),
+        pool_state.vault_a_index,
+        pool_state.vault_b_index,
+        mint_a.key(),
+        mint_b.key(),
+        amount,
+        a_to_b,
+        accounts,
+        ctx
+    )?;
+
+    // 🚀 优化：预分配精确容量，避免扩容 (15个固定账户)
+    let mut account_infos = Vec::with_capacity(15);
+    account_infos.push(token_program_a);       // tokenProgramA
+    account_infos.push(token_program_b);  // tokenProgramB
+    account_infos.push(ctx.accounts.memo_program.to_account_info());        // memoProgram
+    account_infos.push(ctx.accounts.payer.to_account_info());               // tokenAuthority
+    account_infos.push(accounts[pool_state.pool_index].to_account_info());  // whirlpool
+    account_infos.push(mint_a);                                    // tokenMintA
+    account_infos.push(mint_b);                                   // tokenMintB
+    account_infos.push(token_account_a);                                // tokenOwnerAccountA
+    account_infos.push(accounts[pool_state.vault_a_index].to_account_info());      // tokenVaultA
+    account_infos.push(token_account_b);                               // tokenOwnerAccountB
+    account_infos.push(accounts[pool_state.vault_b_index].to_account_info());     // tokenVaultB
+    account_infos.push(accounts[pool_state.tick_array_0_index].to_account_info()); // tickArray0
+    account_infos.push(accounts[pool_state.tick_array_1_index].to_account_info()); // tickArray1
+    account_infos.push(accounts[pool_state.tick_array_2_index].to_account_info()); // tickArray2
+    account_infos.push(accounts[pool_state.oracle_index].to_account_info()); // oracle
+
+    // 执行 CPI 调用
+    invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
+}
+
+/// 执行 Whirlpool 交换
+pub fn execute_whirlpool_mid_swap<'info>(
+    pool_state: &WhirlpoolPoolState,
+    optimization_result: &OptimizationResult,
+    amount: u64,
+    accounts: &[AccountInfo<'info>],
+    ctx: &Context<ComparePrices<'info>>,
+) -> Result<()> {
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
+    let program_id = accounts[pool_state.program_id_index].key();
+    let mint_a = pool_state.token_mint_a;
+    // 确定交换方向和账户
+    let (
+        token_program_a,
+        token_program_b,
+        token_account_a,
+        token_account_b,
+        mint_a,
+        mint_b,
+        a_to_b,
+    ) = if mint_a == accounts[optimization_result.token1_mint_index].key().to_bytes() {
+        (
+            accounts[optimization_result.token1_program_index].to_account_info(),
+            accounts[optimization_result.token2_program_index.unwrap()].to_account_info(),
+            accounts[optimization_result.token1_account_index].to_account_info(),
+            accounts[optimization_result.token2_account_index.unwrap()].to_account_info(),
+            accounts[optimization_result.token1_mint_index].to_account_info(),
+            accounts[optimization_result.token2_mint_index.unwrap()].to_account_info(),
+            true,
+        )
+    } else {
+        (
+            accounts[optimization_result.token2_program_index.unwrap()].to_account_info(),
+            accounts[optimization_result.token1_program_index].to_account_info(),
+            accounts[optimization_result.token2_account_index.unwrap()].to_account_info(),
+            accounts[optimization_result.token1_account_index].to_account_info(),
+            accounts[optimization_result.token2_mint_index.unwrap()].to_account_info(),
+            accounts[optimization_result.token1_mint_index].to_account_info(),
+            false,
+        )
+    };
+
+  
     // 构建 CPI 指令
     let swap_instruction = build_whirlpool_swap_instruction(
         program_id,

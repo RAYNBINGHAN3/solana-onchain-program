@@ -4,7 +4,7 @@ use crate::utils::u256x256_match::{div_rounding_up_u256, mul_div_ceil_u256, mul_
 use crate::utils::u64x64_math::ONE;
 use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
- 
+use crate::constant::WSOL_MINT;
 
 // 导入大数运算库
 use ruint::aliases::{U1024, U256, U512};
@@ -40,8 +40,8 @@ pub struct ClmmPoolState {
     pub tick_array_1_index: usize,
     pub bitmap_extension_index: usize,
 
-    pub token_mint_0: Pubkey,
-    pub token_mint_1: Pubkey,
+    pub token_mint_0: [u8; 32],
+    pub token_mint_1: [u8; 32],
 
     pub sqrt_price_x64: u128,
     pub tick_current: i32,
@@ -52,6 +52,8 @@ pub struct ClmmPoolState {
 
     pub trade_fee_rate: u64,
     pub price: u128,
+
+    pub has_wsol_pool: bool,
 }
  
 /// Bitmap Extension 数据结构 - 与Raydium SDK完全一致
@@ -254,10 +256,10 @@ impl TickArrayBitmapExtension {
 
 #[derive(Debug, Clone)]
 pub struct ClmmParams {
-    pub tick_array_states: Box<Vec<TickArrayState>>,
+    pub tick_array_states: Vec<TickArrayState>,
     pub bitmap_extension: Option<Box<TickArrayBitmapExtension>>, // 提前解析的bitmap extension
     pub sqrt_price_limit_x64: u128,
-    pub tick_array_bitmap: Box<[u64; 16]>,
+    pub tick_array_bitmap: [u64; 16],
 }
 
 /// 交换状态
@@ -415,8 +417,6 @@ impl TickArrayState {
 pub fn parse_clmm_pool_data(
     pool_index: &usize,
     amm_config_index: &usize,
-    wsol_mint: Pubkey,
-    token_mint: Pubkey,
     accounts: &[AccountInfo],
     pool_state: &mut ClmmPoolState,
 ) -> Result<()> {
@@ -428,7 +428,7 @@ pub fn parse_clmm_pool_data(
     );
  
     // 解析基础池数据
-    let (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1) = {
+    let (sqrt_price_x64, tick_current, tick_spacing, liquidity) = {
         let pool_data = pool_account.data.borrow();
   
         // 解析基础字段 (偏移量8开始，加上discriminator)
@@ -437,23 +437,17 @@ pub fn parse_clmm_pool_data(
         let sqrt_price_x64 = u128::from_le_bytes(pool_data[253..269].try_into().unwrap());
         let tick_current = i32::from_le_bytes(pool_data[269..273].try_into().unwrap());
         // 解析mint地址 (偏移量73开始)
-        let token_mint_0 = Pubkey::try_from(&pool_data[73..105]).unwrap();
-        let token_mint_1 = Pubkey::try_from(&pool_data[105..137]).unwrap();
-        (sqrt_price_x64, tick_current, tick_spacing, liquidity, token_mint_0, token_mint_1)
+        let token_mint_0: [u8; 32] = pool_data[73..105].try_into().unwrap();
+        let token_mint_1: [u8; 32] = pool_data[105..137].try_into().unwrap();
+
+        pool_state.has_wsol_pool = token_mint_0 == WSOL_MINT || token_mint_1 == WSOL_MINT;
+        pool_state.token_mint_0 = token_mint_0;
+        pool_state.token_mint_1 = token_mint_1;
+
+        (sqrt_price_x64, tick_current, tick_spacing, liquidity)
     };
 
-    // 验证池子包含SOL和指定token的配对
-    let (_, other_mint) = if token_mint_0 == wsol_mint {
-        (token_mint_0, token_mint_1)
-    } else if token_mint_1 == wsol_mint {
-        (token_mint_1, token_mint_0)
-    } else {
-        return Err(ErrorCode::InvalidTokenPair.into());
-    };
-
-
-    require!(other_mint == token_mint, ErrorCode::TokenMismatch);
-
+    
 
     // 解析amm_config fee
     let amm_config_account = &accounts[*amm_config_index];
@@ -468,8 +462,7 @@ pub fn parse_clmm_pool_data(
  
 
     // 填充池状态
-    pool_state.token_mint_0 = token_mint_0;
-    pool_state.token_mint_1 = token_mint_1;
+   
 
     pool_state.sqrt_price_x64 = sqrt_price_x64;
     pool_state.tick_current = tick_current;
@@ -501,18 +494,22 @@ pub fn extract_tick_array_bitmap(pool_account: &AccountInfo) -> Result<[u64; 16]
 }
 
 /// 计算CLMM价格
-pub fn calculate_clmm_price(pool_state: &mut ClmmPoolState, wsol_mint: Pubkey) -> Result<()> {
+pub fn calculate_clmm_price(pool_state: &mut ClmmPoolState) -> Result<()> {
     let mut price_q64 = pool_state.sqrt_price_x64;
-
+    
+    
     // sqrt_price^2 得到实际价格 (Q64格式)
     // price_q64 = price_q64.checked_mul(price_q64).unwrap().checked_shr(64).unwrap();
     price_q64 = safe_mul_shr_cast(price_q64, price_q64, 64, Rounding::Down);
 
-    // 如果WSOL不是token1，需要取倒数
-    if pool_state.token_mint_1 != wsol_mint {
-        // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
-        price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
+    if pool_state.has_wsol_pool {
+        // 如果WSOL不是token1，需要取倒数
+        if pool_state.token_mint_1 != WSOL_MINT {
+            // 使用安全的除法来计算倒数: (2^64)^2 / price_q64 = 2^128 / price_q64
+            price_q64 = safe_mul_div_cast(ONE, ONE, price_q64, Rounding::Down);
+        }
     }
+
     // msg!("price_q64: {}", price_q64);
     pool_state.price = price_q64;
 
@@ -614,7 +611,6 @@ fn parse_tick_array_state(tick_array_info: &AccountInfo) -> Result<Option<TickAr
 /// CLMM Quote函数 - WSOL输入，Token输出
 pub fn clmm_quote_exact_input_wsol(
     pool_state: &ClmmPoolState,
-    wsol_mint: Pubkey,
     wsol_amount_in: u64,
     token_mint_info: &AccountInfo,
     clmm_params: &Option<ClmmParams>,
@@ -627,9 +623,9 @@ pub fn clmm_quote_exact_input_wsol(
     let params = clmm_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
 
     // 确定交易方向
-    let zero_for_one = if pool_state.token_mint_0 == wsol_mint {
+    let zero_for_one = if pool_state.token_mint_0 == WSOL_MINT {
         true // WSOL是token0，输出token1
-    } else if pool_state.token_mint_1 == wsol_mint {
+    } else if pool_state.token_mint_1 == WSOL_MINT {
         false // WSOL是token1，输出token0
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
@@ -689,7 +685,6 @@ pub fn clmm_quote_exact_input_wsol(
 /// CLMM Quote函数 - Token输入，WSOL输出
 pub fn clmm_quote_exact_input_token(
     pool_state: &ClmmPoolState,
-    wsol_mint: Pubkey,
     token_amount_in: u64,
     token_mint_info: &AccountInfo,
     clmm_params: &Option<ClmmParams>,
@@ -710,9 +705,9 @@ pub fn clmm_quote_exact_input_token(
     };
 
     // 确定交易方向
-    let zero_for_one = if pool_state.token_mint_0 == wsol_mint {
+    let zero_for_one = if pool_state.token_mint_0 == WSOL_MINT {
         false // Token是token1，输出token0(WSOL)
-    } else if pool_state.token_mint_1 == wsol_mint {
+    } else if pool_state.token_mint_1 == WSOL_MINT {
         true // Token是token0，输出token1(WSOL)
     } else {
         return Err(ErrorCode::InvalidTokenPair.into());
@@ -762,10 +757,84 @@ pub fn clmm_quote_exact_input_token(
     Ok(wsol_amount_out)
 }
 
+/// CLMM Quote函数 - Token输入，WSOL输出
+pub fn clmm_quote_exact_input_token_output_token(
+    pool_state: &ClmmPoolState,
+    zero_for_one: bool,
+    token_amount_in: u64,
+    token1_mint_info: &AccountInfo,
+    token2_mint_info: &AccountInfo,
+    clmm_params: &Option<ClmmParams>,
+) -> Result<u64> {
+    
+    if token_amount_in == 0 || pool_state.liquidity == 0{
+        return Ok(0);
+    }
+     
+
+    let params = clmm_params.as_ref().ok_or(ErrorCode::InvalidClmmParams)?;
+
+    // 检查token 2022费用
+    let transfer_fee = get_transfer_fee(token1_mint_info, token_amount_in)?;
+    let actual_token_amount_in = match transfer_fee {
+        0 => token_amount_in,
+        _ => token_amount_in.checked_sub(transfer_fee).unwrap(),
+    };
+  
+
+    let sqrt_price_limit_x64 = if params.sqrt_price_limit_x64 == 0 {
+        if zero_for_one {
+            MIN_SQRT_PRICE_X64
+        } else {
+            MAX_SQRT_PRICE_X64
+        }
+    } else {
+        params.sqrt_price_limit_x64
+    };
+
+    // 验证价格限制
+    if zero_for_one {
+        require!(
+            sqrt_price_limit_x64 < pool_state.sqrt_price_x64
+                && sqrt_price_limit_x64 >= MIN_SQRT_PRICE_X64,
+            ErrorCode::InvalidSqrtPriceLimit
+        );
+    } else {
+        require!(
+            sqrt_price_limit_x64 > pool_state.sqrt_price_x64
+                && sqrt_price_limit_x64 <= MAX_SQRT_PRICE_X64,
+            ErrorCode::InvalidSqrtPriceLimit
+        );
+    }
+ 
+
+    // 执行交换计算 - 直接使用原始数据，避免大量克隆造成栈溢出
+    // let mut tick_array_states_clone = params.tick_array_states.clone();
+    let (amount_0, amount_1) = clmm_swap_internal(
+        pool_state,
+        &params.tick_array_states,
+        &params.tick_array_bitmap,
+        &params.bitmap_extension, // 使用预解析的bitmap extension
+        actual_token_amount_in,
+        sqrt_price_limit_x64, // sqrt_price_limit = 0 表示无价格限制
+        zero_for_one,
+        // true, // is_base_input
+    )?;
+
+    let token2_amount_out = if zero_for_one { amount_1 } else { amount_0 };
+
+    //check token 2022 fee
+    let transfer_fee = get_transfer_fee(token2_mint_info, token2_amount_out as u64)?;
+    let token2_amount_out = match transfer_fee {
+        0 => token2_amount_out,
+        _ => token2_amount_out.checked_sub(transfer_fee).unwrap(),
+    };
+
+    Ok(token2_amount_out)
+}
+
 
 pub fn parse_tick_array_states(tick_arrays: &Vec<&AccountInfo>) -> Result<Vec<TickArrayState>> {
-  
-    // 🚀 优化：预分配容量，避免动态扩容
     let mut tick_array_states: Vec<TickArrayState> = Vec::with_capacity(tick_arrays.len());
     for tick_array_info in tick_arrays {
         if let Some(tick_array_state) = parse_tick_array_state(tick_array_info)? {

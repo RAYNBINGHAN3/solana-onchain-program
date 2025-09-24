@@ -3,7 +3,8 @@ use crate::ComparePrices;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
-
+use crate::constant::WSOL_MINT;
+use crate::optimalamt::OptimizationResult;
 
 /// 执行CLMM交换
 pub fn execute_clmm_swap<'info>(
@@ -15,7 +16,7 @@ pub fn execute_clmm_swap<'info>(
     ctx: &Context<ComparePrices<'info>>,
     is_buy: bool, // true: WSOL->Token, false: Token->WSOL
 ) -> Result<()> {
-    let wsol_mint = ctx.accounts.wsol_mint.key();
+    // let wsol_mint = ctx.accounts.wsol_mint.key();
     // let token_mint = accounts[token_mint_index].key();
     // let program_id = accounts[token_program_index].key();
     let program_id = accounts[pool_state.program_id_index].key();
@@ -30,7 +31,7 @@ pub fn execute_clmm_swap<'info>(
         output_mint_info,
     ) = if is_buy {
         // 买入：WSOL -> Token
-        if pool_state.token_mint_0 == wsol_mint {
+        if pool_state.token_mint_0 == WSOL_MINT {
             (
                 ctx.accounts.wsol_token_account.to_account_info(),
                 accounts[mint_token_account_index].to_account_info(),
@@ -52,7 +53,7 @@ pub fn execute_clmm_swap<'info>(
         
     } else {
         // 卖出：Token -> WSOL
-        if pool_state.token_mint_0 == wsol_mint {
+        if pool_state.token_mint_0 == WSOL_MINT {
             (
                 accounts[mint_token_account_index].to_account_info(),
                 ctx.accounts.wsol_token_account.to_account_info(),
@@ -123,6 +124,91 @@ pub fn execute_clmm_swap<'info>(
 
     invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
 }
+
+/// 执行CLMM交换
+pub fn execute_clmm_mid_swap<'info>(
+    pool_state: &ClmmPoolState,
+    optimization_result: &OptimizationResult,
+    amount: u64,
+    accounts: &[AccountInfo<'info>],
+    ctx: &Context<ComparePrices<'info>>,
+) -> Result<()> {
+   
+    let program_id = accounts[pool_state.program_id_index].key();
+
+    // 确定交换方向和账户
+    let (
+        input_token_account,
+        output_token_account,
+        input_vault_index,
+        output_vault_index,
+        input_mint_info,
+        output_mint_info,
+    ) = {
+        (
+            accounts[optimization_result.token1_account_index].to_account_info(),
+            accounts[optimization_result.token2_account_index.unwrap()].to_account_info(),
+            pool_state.token_vault_1_index,
+            pool_state.token_vault_0_index,
+            accounts[optimization_result.token1_mint_index].to_account_info(),
+            accounts[optimization_result.token2_mint_index.unwrap()].to_account_info(),
+        )
+    };
+        
+
+    //过滤掉未初始化的tick array
+    let tick_array_indices = [
+        pool_state.tick_array_minus_1_index,
+        pool_state.tick_array_0_index,
+        pool_state.tick_array_1_index,
+    ];
+    let valid_tick_arrays = get_valid_tick_arrays(accounts, &tick_array_indices, program_id);
+
+    // 构建CPI指令
+    let swap_instruction = build_clmm_swap_instruction(
+        program_id,
+        pool_state,
+        &ctx.accounts.payer.key(),
+        input_token_account.key(),
+        output_token_account.key(),
+        input_vault_index,
+        output_vault_index,
+        input_mint_info.key(),
+        output_mint_info.key(),
+        amount,
+        accounts,
+        ctx,
+        &valid_tick_arrays,
+    )?;
+    
+    
+    // 🚀 优化：预分配精确容量，避免扩容 (14个固定账户 + 最多3个tick_arrays)
+    let mut account_infos = Vec::with_capacity(14 + valid_tick_arrays.len());
+    
+    // 按顺序添加固定账户
+    account_infos.push(ctx.accounts.payer.to_account_info());
+    account_infos.push(accounts[pool_state.amm_config_index].to_account_info());
+    account_infos.push(accounts[pool_state.pool_index].to_account_info());
+    account_infos.push(input_token_account);
+    account_infos.push(output_token_account);
+    account_infos.push(accounts[input_vault_index].to_account_info());
+    account_infos.push(accounts[output_vault_index].to_account_info());
+    account_infos.push(accounts[pool_state.observation_key_index].to_account_info());
+    account_infos.push(ctx.accounts.token_program.to_account_info());
+    account_infos.push(ctx.accounts.token_program_2022.to_account_info());
+    account_infos.push(ctx.accounts.memo_program.to_account_info());
+    account_infos.push(input_mint_info);
+    account_infos.push(output_mint_info);
+    account_infos.push(accounts[pool_state.bitmap_extension_index].to_account_info());
+
+    // 添加有效的tick arrays
+    account_infos.extend(valid_tick_arrays);
+
+    invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
+}
+
+
+
 
 /// 构建CLMM swap_v2指令
 fn build_clmm_swap_instruction(

@@ -5,6 +5,7 @@ use anchor_lang::prelude::*;
 
 
 /// U256 乘法除法向下舍入
+#[inline]
 pub fn mul_div_floor_u256(a: U256, b: U256, c: U256) -> Result<U256> {
     if c.is_zero() {
         return Err(ErrorCode::CalculateOverflow.into());
@@ -27,6 +28,7 @@ pub fn mul_div_floor_u256(a: U256, b: U256, c: U256) -> Result<U256> {
 }
 
 /// U256 乘法除法向上舍入
+#[inline]
 pub fn mul_div_ceil_u256(a: U256, b: U256, c: U256) -> Result<U256> {
     if c.is_zero() {
         return Err(ErrorCode::CalculateOverflow.into());
@@ -57,6 +59,7 @@ pub fn mul_div_ceil_u256(a: U256, b: U256, c: U256) -> Result<U256> {
 }
 
 /// U256 除法向上舍入
+#[inline]
 pub fn div_rounding_up_u256(a: U256, b: U256) -> U256 {
     let quotient = a / b;
     let remainder = a % b;

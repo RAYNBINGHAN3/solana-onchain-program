@@ -3,9 +3,11 @@ use crate::ComparePrices;
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
- 
+use crate::constant::WSOL_MINT;
+use crate::optimalamt::OptimizationResult;
 
 /// 执行DLMM交易 (买入或卖出)
+#[allow(clippy::too_many_arguments)]
 pub fn execute_dlmm_swap<'info>(
     pool_state: &DlmmPoolState,
     token_mint_index: usize,
@@ -19,16 +21,12 @@ pub fn execute_dlmm_swap<'info>(
     trade_amount: u64,
     accounts: &[AccountInfo<'info>],
     ctx: &Context<ComparePrices<'info>>,
-    wsol_mint: Pubkey,
     is_buy: bool, // true=买入(WSOL->Token), false=卖出(Token->WSOL)
 ) -> Result<()> {
-    // let wsol_mint = ctx.accounts.wsol_mint.key();
-   
-    // let is_token_2022 = is_token_2022(accounts[token_program_index].key());
 
     // 确定token X和Y的mint和program (保持不变，因为DLMM的X/Y是固定的)
     let (token_x_mint, token_y_mint, token_x_program, token_y_program) =
-        if pool_state.token_x_mint == wsol_mint {
+        if pool_state.token_x_mint == WSOL_MINT {
             (
                 ctx.accounts.wsol_mint.to_account_info(),
                 accounts[token_mint_index].to_account_info(),
@@ -84,10 +82,7 @@ pub fn execute_dlmm_swap<'info>(
     account_metas.push(AccountMeta::new_readonly(ctx.accounts.payer.key(), true)); // user (signer)
     account_metas.push(AccountMeta::new_readonly(token_x_program.key(), false)); // token_x_program
     account_metas.push(AccountMeta::new_readonly(token_y_program.key(), false)); // token_y_program
-    //如果token program是Token2022，则添加memo_program
-    // if is_token_2022 {
-    //     account_metas.push(AccountMeta::new_readonly(ctx.accounts.memo_program.key(),false,)); // memo_program
-    // }
+  
     account_metas.push(AccountMeta::new_readonly(ctx.accounts.memo_program.key(),false,)); // memo_program
 
     account_metas.push(AccountMeta::new_readonly(accounts[pool_state.event_authority_index].key(),false,)); // event_authority
@@ -167,6 +162,97 @@ pub fn execute_dlmm_swap<'info>(
     // 执行原始指令调用 - 最高效的方式！
     invoke(&swap_instruction, &account_infos).map_err(|e| e.into())
 }
+
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_dlmm_mid_swap<'info>(
+    pool_state: &DlmmPoolState,
+    optimization_result: &OptimizationResult,
+    bin_array_minus_1_index: usize,
+    bin_array_0_index: usize,
+    bin_array_1_index: usize,
+    reserve_x_index: usize,
+    reserve_y_index: usize,
+    trade_amount: u64,
+    accounts: &[AccountInfo<'info>],
+    ctx: &Context<ComparePrices<'info>>
+) -> Result<()> {
+    let bin_array_indices = [
+        bin_array_minus_1_index,
+        bin_array_0_index,
+        bin_array_1_index,
+    ];
+    let valid_bin_arrays =
+        get_valid_bin_arrays(accounts, &bin_array_indices, pool_state.program_id_index);
+
+    
+    let mut account_metas = Vec::with_capacity(16 + valid_bin_arrays.len());
+    // 按照DLMM swap指令的账户顺序添加
+    account_metas.push(AccountMeta::new(accounts[pool_state.pool_index].key(), false,)); // lb_pair
+    account_metas.push(AccountMeta::new_readonly(accounts[pool_state.program_id_index].key(),false,)); // bin_array_bitmap_extension
+    account_metas.push(AccountMeta::new(accounts[reserve_x_index].key(), false)); // reserve_x
+    account_metas.push(AccountMeta::new(accounts[reserve_y_index].key(), false)); // reserve_y
+    account_metas.push(AccountMeta::new(accounts[optimization_result.token1_account_index].key(), false)); // user_token_in
+    account_metas.push(AccountMeta::new(accounts[optimization_result.token2_account_index.unwrap()].key(), false)); // user_token_out
+    account_metas.push(AccountMeta::new_readonly(accounts[optimization_result.token1_mint_index].key(), false)); // token_x_mint
+    account_metas.push(AccountMeta::new_readonly(accounts[optimization_result.token2_mint_index.unwrap()].key(), false)); // token_y_mint
+    account_metas.push(AccountMeta::new( accounts[pool_state.oracle_index].key(), false,)); // oracle
+    account_metas.push(AccountMeta::new_readonly( accounts[pool_state.program_id_index].key(), false, )); // host_fee_in
+    account_metas.push(AccountMeta::new_readonly(ctx.accounts.payer.key(), true)); // user (signer)
+    account_metas.push(AccountMeta::new_readonly(accounts[optimization_result.token1_program_index].key(), false)); // token_x_program
+    account_metas.push(AccountMeta::new_readonly(accounts[optimization_result.token2_program_index.unwrap()].key(), false)); // token_y_program
+    // 添加memo_program
+    account_metas.push(AccountMeta::new_readonly(ctx.accounts.memo_program.key(),false,)); // memo_program
+    account_metas.push(AccountMeta::new_readonly(accounts[pool_state.event_authority_index].key(),false,)); // event_authority
+    account_metas.push(AccountMeta::new_readonly(accounts[pool_state.program_id_index].key(),false,)); // program
+    // 添加有效的bin arrays作为remaining accounts
+    for bin_array in &valid_bin_arrays {
+        account_metas.push(AccountMeta::new(bin_array.key(), false));
+    }
+
+    let mut instruction_data = Vec::with_capacity(28);
+    instruction_data.extend_from_slice(&[65, 75, 63, 76, 235, 91, 91, 136]); // swap2 discriminator
+    instruction_data.extend_from_slice(&trade_amount.to_le_bytes()); // amount_in
+    instruction_data.extend_from_slice(&0u64.to_le_bytes()); // min_amount_out
+    instruction_data.extend_from_slice(&0u32.to_le_bytes()); // slices.len() = 0
+  
+    
+    // 构建指令
+    let swap_instruction = Instruction {
+        program_id: accounts[pool_state.program_id_index].key(),
+        accounts: account_metas,
+        data: instruction_data,
+    };
+    
+    // 🚀 优化：构建账户信息数组
+    let mut account_infos = Vec::with_capacity(17);
+    account_infos.push(accounts[pool_state.pool_index].to_account_info()); // lb_pair
+                                                                           // 跳过 bin_array_bitmap_extension (可选账户)
+    account_infos.push(accounts[reserve_x_index].to_account_info()); // reserve_x
+    account_infos.push(accounts[reserve_y_index].to_account_info()); // reserve_y
+    account_infos.push(accounts[optimization_result.token1_account_index].to_account_info()); // user_token_in
+    account_infos.push(accounts[optimization_result.token2_account_index.unwrap()].to_account_info()); // user_token_out
+    account_infos.push(accounts[optimization_result.token1_mint_index].to_account_info()); // token_x_mint
+    account_infos.push(accounts[optimization_result.token2_mint_index.unwrap()].to_account_info()); // token_y_mint
+    account_infos.push(accounts[pool_state.oracle_index].to_account_info()); // oracle
+                                                                             // 跳过 host_fee_in (可选账户)
+    account_infos.push(ctx.accounts.payer.to_account_info()); // user (signer)
+    account_infos.push(accounts[optimization_result.token1_program_index].to_account_info()); // token_x_program
+    account_infos.push(accounts[optimization_result.token2_program_index.unwrap()].to_account_info()); // token_y_program
+
+    account_infos.push(ctx.accounts.memo_program.to_account_info()); // memo_program
+    account_infos.push(accounts[pool_state.event_authority_index].to_account_info()); // event_authority
+    account_infos.push(accounts[pool_state.program_id_index].to_account_info()); // program
+    // 添加有效的bin arrays
+    account_infos.extend(valid_bin_arrays);
+
+    // 执行原始指令调用 - 最高效的方式！
+    invoke(&swap_instruction, &account_infos).map_err(|e| e.into()) 
+}
+
+
+
+
 
 /// 🚀 高效过滤有效的bin arrays
 /// 优化：预分配容量，直接比较Pubkey，最小化内存分配
