@@ -28,9 +28,9 @@ use crate::constant::{
 
 #[derive(Debug, Clone)]
 pub struct TokenPoolGroup {
-    pub token_mint_index: usize,
-    pub token_program_index: usize,
-    pub mint_token_account_index: usize,
+    pub token1_mint_index: usize,
+    pub token1_program_index: usize,
+    pub token1_mint_token_account_index: usize,
     pub pools: Vec<PoolData>,
     pub is_3hop: bool,
     pub token2_mint_index: Option<usize>,
@@ -184,9 +184,9 @@ pub fn parse_token_groups<'info>(remaining_accounts: &'info [AccountInfo<'info>]
     let mut token_groups = Vec::with_capacity(3);
 
     while current_index + 3 < remaining_accounts.len() {
-        let token_mint_index = current_index;
-        let token_program_index = current_index + 1;
-        let mint_token_account_index = current_index + 2;
+        let token1_mint_index = current_index;
+        let token1_program_index = current_index + 1;
+        let token1_mint_token_account_index = current_index + 2;
 
         // 判断是否为3hop（通过占位的memo_program账户）
         let is_3hop = if remaining_accounts[current_index + 3].key() == remaining_accounts[current_index + 2].key() { true } else { false };
@@ -340,9 +340,9 @@ pub fn parse_token_groups<'info>(remaining_accounts: &'info [AccountInfo<'info>]
 
         if !pools.is_empty() {
             token_groups.push(TokenPoolGroup {
-                token_mint_index,
-                token_program_index,
-                mint_token_account_index,
+                token1_mint_index,
+                token1_program_index,
+                token1_mint_token_account_index,
                 pools,
                 is_3hop,
                 token2_mint_index,

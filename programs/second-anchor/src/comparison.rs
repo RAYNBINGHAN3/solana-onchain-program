@@ -161,9 +161,9 @@ fn process_token_groups(
     analysis_state: &mut Box<AnalysisState>,
 ) -> Result<()> {
     // 🚀 关键优化：提前分流2hop和3hop处理
-    let has_3hop_group = token_groups.iter().any(|group| group.token2_mint_index.is_some());
+    let is_3hop_group = token_groups.iter().any(|group| group.token2_mint_index.is_some());
     
-    if has_3hop_group {
+    if is_3hop_group {
         // 3hop情况：只处理第一个token组（3hop只有一组）
         if let Some(token_group) = token_groups.first() {
             process_3hop_token_group(token_group, accounts, is_dir_swap, analysis_state)?;
@@ -191,7 +191,6 @@ fn process_2hop_token_groups(
         for pool_data in &token_group.pools {
             if let Ok(parsed_state) = parse_pool_with_state(
                 pool_data,
-                token_group.token_mint_index,
                 accounts,
                 is_dir_swap,
             ) {
@@ -204,9 +203,9 @@ fn process_2hop_token_groups(
             analysis_state.best_buy_pool_state = Some(parsed_pools[0].clone());
             analysis_state.best_sell_pool_state = Some(parsed_pools[1].clone());
             analysis_state.best_two_hop_token_info = Some(TwoHopTokenInfo {
-                token_mint_index: token_group.token_mint_index,
-                token_program_index: token_group.token_program_index,
-                mint_token_account_index: token_group.mint_token_account_index,
+                token_mint_index: token_group.token1_mint_index,
+                token_program_index: token_group.token1_program_index,
+                mint_token_account_index: token_group.token1_mint_token_account_index,
             });
             return Ok(());
         }
@@ -237,25 +236,21 @@ fn process_3hop_token_group(
     for pool_data in &token_group.pools {
         if let Ok(parsed_state) = parse_pool_with_state(
             pool_data,
-            token_group.token_mint_index,
             accounts,
             is_dir_swap,
         ) {
             parsed_pools.push(parsed_state);
         }
     }
-
+    
     // 直接交易模式处理
-    if is_dir_swap && parsed_pools.len() >= 3 {
-        analysis_state.best_buy_pool_state = Some(parsed_pools[0].clone());
-        analysis_state.best_sell_pool_state = Some(parsed_pools[1].clone());
-        analysis_state.best_two_hop_token_info = Some(TwoHopTokenInfo {
-            token_mint_index: token_group.token_mint_index,
-            token_program_index: token_group.token_program_index,
-            mint_token_account_index: token_group.mint_token_account_index,
-        });
-        return Ok(());
-    }
+    // if is_dir_swap && parsed_pools.len() >= 3 {
+    //     analysis_state.best_buy_pool_state = Some(parsed_pools[0].clone());
+    //     analysis_state.best_sell_pool_state = Some(parsed_pools[2].clone());
+    //     analysis_state.best_two_hop_token_info = None;
+    //     analysis_state.best_mid_pool_state = None;
+    //     return Ok(());
+    // }
 
     // 3hop套利分析
     if parsed_pools.len() >= 3 {
@@ -288,16 +283,16 @@ fn update_best_analysis(
             buy_pool_tokens.0 
         };
         
-        let token1_account_key = accounts[token_group.token_mint_index].key();
+        let token1_account_key = accounts[token_group.token1_mint_index].key();
         let (token1_indices, token2_indices) = if token1_account_key.to_bytes() == token1_mint {
             (
-                (token_group.token_mint_index, token_group.token_program_index, token_group.mint_token_account_index),
+                (token_group.token1_mint_index, token_group.token1_program_index, token_group.token1_mint_token_account_index),
                 (token_group.token2_mint_index.unwrap(), token_group.token2_program_index.unwrap(), token_group.token2_mint_token_account_index.unwrap())
             )
         } else {
             (
                 (token_group.token2_mint_index.unwrap(), token_group.token2_program_index.unwrap(), token_group.token2_mint_token_account_index.unwrap()),
-                (token_group.token_mint_index, token_group.token_program_index, token_group.mint_token_account_index)
+                (token_group.token1_mint_index, token_group.token1_program_index, token_group.token1_mint_token_account_index)
             )
         };
         
@@ -314,9 +309,9 @@ fn update_best_analysis(
     } else {
         // 2hop处理
         analysis_state.best_two_hop_token_info = Some(TwoHopTokenInfo {
-            token_mint_index: token_group.token_mint_index,
-            token_program_index: token_group.token_program_index,
-            mint_token_account_index: token_group.mint_token_account_index,
+            token_mint_index: token_group.token1_mint_index,
+            token_program_index: token_group.token1_program_index,
+            mint_token_account_index: token_group.token1_mint_token_account_index,
         });
         analysis_state.best_mid_pool_state = None;
     }
@@ -329,7 +324,6 @@ fn update_best_analysis(
 /// 🚀 栈优化：返回Box避免大型结构体在栈上
 fn parse_pool_with_state(
     pool_data: &PoolData,
-    token_mint_index: usize,
     accounts: &[AccountInfo],
     is_dir_swap: bool,
 ) -> Result<Box<ParsedPoolState>> {
@@ -551,15 +545,15 @@ fn parse_pool_with_state(
                 coin_creator_fee_basis_points: 0,
                 fee_config_index: *fee_config_index,
                 fee_program_index: *fee_program_index,
-                coin_creator: *accounts[token_mint_index].key,
-                creator: *accounts[token_mint_index].key,
+                coin_creator: *accounts[*global_config_index].key,
+                creator: *accounts[*global_config_index].key,
                 has_wsol_pool: false,
             };
 
             parse_pump_pool_data(
                 pool_index,
                 accounts,
-                &token_mint_index,
+                // &token_mint_index,
                 &mut pool_state,
             )?;
 

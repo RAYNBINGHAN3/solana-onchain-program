@@ -153,7 +153,6 @@ fn execute_pump_buy<'info>(
         AccountMeta::new_readonly(accounts[pool_state.fee_program_index].key(), false), // fee_program
     ];
 
-    //注意 如果quote mint是wsol 那么max_quote_amount_in计算真实最大quote amount in, 如果quote mint是token 不算了，因为token余额只有那么多
     let mut max_quote_amount_in = wsol_amount;
     if pool_state.quote_mint == WSOL_MINT {
         max_quote_amount_in = pump_buy_base_input_internal(pool_state, *max_token_amount_out)?;

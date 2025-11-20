@@ -2,7 +2,7 @@ use crate::utils::errors::ErrorCode;
 use crate::utils::u64x64_math::{ceil_div, ceil_div_u128, SCALE_OFFSET};
 use crate::utils::utils::get_transfer_fee;
 use anchor_lang::prelude::*;
-use crate::constant::WSOL_MINT;
+use crate::constant::{WSOL_MINT};
 
 // // Pump程序ID
 // pub const PUMP_PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
@@ -63,12 +63,25 @@ pub struct PumpPoolState {
     pub has_wsol_pool: bool,
 }
 
+/// 在accounts数组中查找指定mint的账户索引
+fn find_mint_account_index(accounts: &[AccountInfo], target_mint: &[u8; 32]) -> Result<usize> {
+    let target_pubkey = Pubkey::new_from_array(*target_mint);
+    
+    for (index, account) in accounts.iter().enumerate() {
+        if account.key == &target_pubkey {
+            return Ok(index);
+        }
+    }
+    
+    Err(ErrorCode::InvalidAccount.into())
+}
+
 /// 解析 Pump 池数据
 /// 🚀 优化版：使用直接字节偏移解析 Pump 池数据，节省 CU
 pub fn parse_pump_pool_data(
     pool_index: &usize,
     accounts: &[AccountInfo],
-    token_mint_index: &usize,
+    // token_mint_index: &usize,
     pool_state: &mut PumpPoolState,
 ) -> Result<()> {
     let pool_account = &accounts[*pool_index];
@@ -87,6 +100,16 @@ pub fn parse_pump_pool_data(
     pool_state.has_wsol_pool = base_mint == WSOL_MINT || quote_mint == WSOL_MINT;
     pool_state.base_mint = base_mint.try_into().unwrap();
     pool_state.quote_mint = quote_mint.try_into().unwrap();
+
+    let mint_from_pump = if pool_state.has_wsol_pool {
+       if pool_state.quote_mint == WSOL_MINT{
+         pool_state.base_mint
+       } else {
+         pool_state.quote_mint
+       }
+    } else {
+        pool_state.base_mint
+    };
 
     // 解析 creator (池子创建者) 和 coin_creator (代币创建者)
     pool_state.creator = Pubkey::try_from(&pool_data[11..43]).unwrap();      // creator字段
@@ -116,8 +139,12 @@ pub fn parse_pump_pool_data(
     // 检查是否有 fee_config 账户（用于动态费率）
     let fee_config_account = &accounts[pool_state.fee_config_index];
     
+    // 在accounts数组中查找mint_from_pump对应的账户索引
+    let mint_account_index = find_mint_account_index(accounts, &mint_from_pump)?;
+    
     let supply = {
-        let mint = accounts[*token_mint_index].data.borrow();
+        //从accounts中获取mint
+        let mint = accounts[mint_account_index].data.borrow();
         u64::from_le_bytes(mint[36..44].try_into().unwrap())
     };
     // msg!("supply: {} mint: {}", supply, accounts[token_mint_index].key);
@@ -125,7 +152,7 @@ pub fn parse_pump_pool_data(
     // 使用动态费率计算 - 在作用域内借用fee_config_data
     let (lp_fee, protocol_fee, creator_fee) = {
         let fee_config_data = fee_config_account.data.borrow();
-        compute_dynamic_fees(pool_state, supply, accounts[*token_mint_index].key, &fee_config_data)?
+        compute_dynamic_fees(pool_state, supply, accounts[mint_account_index].key, &fee_config_data)?
     };
 
     pool_state.lp_fee_basis_points = lp_fee;
@@ -137,7 +164,7 @@ pub fn parse_pump_pool_data(
 }
 
 /// 动态费率计算结构体 - 匹配链上数据格式
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct FeeTier {
     market_cap_lamports_threshold: u128,  // 注意：IDL中定义的是u128，不是u64！
     lp_fee_bps: u64,
