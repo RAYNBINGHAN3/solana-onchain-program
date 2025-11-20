@@ -15,7 +15,7 @@ use comparison::analyze_global_arbitrage_opportunities;
 use optimalamt::find_optimal_wsol_amount_golden_section;
  
  
-declare_id!("2dDzSGtvn2d46asoSU733SL6hRRNS2waMrC2rDksSs4s");
+declare_id!("11111111111111111111111111111111");
 
 /// 账户结构定义
 #[derive(Accounts)]
