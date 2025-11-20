@@ -2,6 +2,11 @@
 
 ---
 
+<img width="1761" height="654" alt="image" src="https://github.com/user-attachments/assets/08f60921-3041-4306-a532-799e58e4667b" />
+<img width="2049" height="852" alt="image" src="https://github.com/user-attachments/assets/71b50165-c53a-4092-9927-c3629ada7844" />
+
+---
+
 <a name="en"></a>
 
 # solana-onchain-program 
@@ -114,5 +119,6 @@ anchor build
 如有任何反馈或建议，欢迎提交 PR 或 Issue。
 
 ---
+
 
 
