@@ -6,7 +6,7 @@
 
 # solana-onchain-program 
 
-> **⚠️ This project is an early prototype by the author, with no engineering or performance optimization. For any production/commercial use, code refactor and optimization are strongly recommended (suggest follows `pinocchio` practices).**
+> **⚠️ This project is an early prototype by the author, with no deep performance optimization. For any production/commercial use, code refactor and optimization are strongly recommended (suggest follows `pinocchio` practices).**
 
 ---
 
@@ -63,7 +63,7 @@ For feedback or suggestions, please create a PR or an Issue.
 
 # solana-onchain-program
 
-> **⚠️ 本项目为作者初期编写，代码结构未作性能考虑**
+> **⚠️ 本项目为作者初期编写，代码结构未作深度性能优化**
 > **建议开发者基于自身理解重构，推荐参考 `pinocchio` 设计思路优化。**
 
 ---
