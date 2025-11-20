@@ -44,14 +44,13 @@
 # Anchor development environment is required
 anchor build
 
-# Before deployment and execution, be sure to manually configure accounts and pools
 # This project provides no security guarantees for any on-chain operations
 ```
 
 ## Suggestions
 
-- It's recommended to `fork` this project, then refactor and optimize it by combining the design principles of `pinocchio` with your own requirements.
-- Avoid directly copying the code. Always conduct a code review and gain a deep understanding of the business logic.
+- It's recommended to `fork` this project, then optimize it by combining the design principles of `pinocchio` with your own requirements.
+- Always conduct a code review and gain a deep understanding of the business logic.
 
 ---
 
@@ -83,7 +82,7 @@ For feedback or suggestions, please create a PR or an Issue.
 ### 特殊说明
 - 本项目主要用于研究和二次开发，未进行性能优化。
 - 部分代码实现可能不完善，需要使用者自行甄别和优化。
-- 强烈建议开发者以学习为目的，并根据自身业务需求进行深度定制和重构（推荐采用 `pinocchio` 方案）。
+- 强烈建议开发者以学习为目的，并根据自身业务需求进行重构（推荐采用 `pinocchio` 方案）。
 
 ## 目录结构
 
@@ -101,14 +100,14 @@ For feedback or suggestions, please create a PR or an Issue.
 # 需要 Anchor 开发环境
 anchor build
 
-# 部署和运行前，请务必手动配置账户和交易池
+# 部署和运行前，请务必参阅理解Anchor项目
 # 本项目不对任何主网上链操作的安全性提供保证
 ```
 
 ## 建议
 
 - 推荐 `fork` 本项目后，结合 `pinocchio` 的设计思想和自身需求进行优化重构。
-- 避免直接抄用代码，务必进行代码审查（Code Review）并深度理解其业务逻辑。
+- 务必进行代码审查（Code Review）并深度理解其业务逻辑。
 
 ---
 
