@@ -34,7 +34,7 @@
 - `src/utils/`: Common utilities, math libraries, and calculation functions.
 - `src/comparison.rs`: Core logic for arbitrage path comparison and calculation.
 - `src/optimalamt.rs`: Algorithm for calculating the optimal arbitrage amount.
-- ... Other modules are self-explanatory.
+- ... Other modules.
 
 ## Getting Started
 
@@ -92,7 +92,7 @@ For feedback or suggestions, please create a PR or an Issue.
 - `src/utils/`：通用工具、数学库和计算函数。
 - `src/comparison.rs`：核心的套利路径比较和计算逻辑。
 - `src/optimalamt.rs`：用于计算最优套利金额的算法。
-- ... 其他各模块功能自解释。
+- ... 其他各模块功能。
 
 ## 快速开始
 
